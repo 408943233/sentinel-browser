@@ -58,7 +58,9 @@
     ],
     "asar": true,
     "asarUnpack": [
-      "bin/**/*"
+      "bin/**/*",
+      "node_modules/archiver/**/*",
+      "node_modules/readdir-glob/**/*"
     ],
     "mac": {
       "category": "public.app-category.utilities",
