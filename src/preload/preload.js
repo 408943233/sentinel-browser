@@ -122,6 +122,9 @@ contextBridge.exposeInMainWorld('sentinelAPI', {
   // 获取平台信息
   getPlatform: () => ipcRenderer.invoke('get-platform'),
 
+  // 聚焦窗口（确保录制时窗口可见）
+  focusWindow: () => ipcRenderer.invoke('focus-window'),
+
   // DOM操作
   getDOMSnapshot: () => {
     return {

@@ -1,4 +1,4 @@
-const { app, BrowserWindow, ipcMain, dialog, session, shell } = require('electron');
+const { app, BrowserWindow, ipcMain, dialog, session, shell, systemPreferences } = require('electron');
 const path = require('path');
 const os = require('os');
 const fs = require('fs');
@@ -177,7 +177,8 @@ function clearDynamicResources() {
 let STORAGE_PATH = null;
 
 const getDefaultStoragePath = () => {
-  return path.join(app.getPath('documents'), 'SentinelBrowser', 'collections');
+  // 使用 /tmp 目录避免 macOS iCloud 和权限问题
+  return path.join('/tmp', 'SentinelBrowser', 'collections');
 };
 
 // 选择存储目录（Windows 在启动任务时调用）
@@ -1220,18 +1221,31 @@ async function startRecording(taskConfig = {}) {
   const taskDirName = `task_${safeTaskName}_${safeUrl}_${shortTaskId}`;
   const taskDir = path.join(STORAGE_PATH, taskDirName);
 
+  log.info('Creating task directory:', taskDir);
+  log.info('STORAGE_PATH:', STORAGE_PATH);
+  log.info('Current user:', process.env.USER);
+  log.info('Platform:', process.platform);
+
   // 创建任务目录结构（按照新设计规范）
-  fs.mkdirSync(taskDir, { recursive: true });
-  fs.mkdirSync(path.join(taskDir, 'video'), { recursive: true });
-  fs.mkdirSync(path.join(taskDir, 'network'), { recursive: true });
-  fs.mkdirSync(path.join(taskDir, 'network', 'resources'), { recursive: true });
-  fs.mkdirSync(path.join(taskDir, 'previews'), { recursive: true });
-  fs.mkdirSync(path.join(taskDir, 'previews', 'snapshots'), { recursive: true });
-  fs.mkdirSync(path.join(taskDir, 'sandbox'), { recursive: true });
-  fs.mkdirSync(path.join(taskDir, 'logs'), { recursive: true });
-  fs.mkdirSync(path.join(taskDir, 'dom'), { recursive: true });
-  fs.mkdirSync(path.join(taskDir, 'downloads'), { recursive: true });
-  fs.mkdirSync(path.join(taskDir, 'uploads'), { recursive: true });
+  try {
+    fs.mkdirSync(taskDir, { recursive: true });
+    fs.mkdirSync(path.join(taskDir, 'video'), { recursive: true });
+    fs.mkdirSync(path.join(taskDir, 'network'), { recursive: true });
+    fs.mkdirSync(path.join(taskDir, 'network', 'resources'), { recursive: true });
+    fs.mkdirSync(path.join(taskDir, 'previews'), { recursive: true });
+    fs.mkdirSync(path.join(taskDir, 'previews', 'snapshots'), { recursive: true });
+    fs.mkdirSync(path.join(taskDir, 'sandbox'), { recursive: true });
+    fs.mkdirSync(path.join(taskDir, 'logs'), { recursive: true });
+    fs.mkdirSync(path.join(taskDir, 'dom'), { recursive: true });
+    fs.mkdirSync(path.join(taskDir, 'downloads'), { recursive: true });
+    fs.mkdirSync(path.join(taskDir, 'uploads'), { recursive: true });
+    log.info('Task directories created successfully');
+  } catch (mkdirError) {
+    log.error('Failed to create task directories:', mkdirError);
+    log.error('Error code:', mkdirError.code);
+    log.error('Error path:', mkdirError.path);
+    throw new Error(`Failed to create task directory: ${mkdirError.message}`);
+  }
 
   globalState.currentTask = {
     id: taskId,
@@ -3504,6 +3518,22 @@ ipcMain.handle('get-platform', () => {
   return process.platform;
 });
 
+// 聚焦窗口（确保录制时窗口可见）
+ipcMain.handle('focus-window', async (event) => {
+  const win = BrowserWindow.fromWebContents(event.sender);
+  if (win) {
+    if (win.isMinimized()) {
+      win.restore();
+    }
+    win.show();
+    win.focus();
+    win.moveTop();
+    log.info('Window focused for recording');
+    return true;
+  }
+  return false;
+});
+
 // 获取 webview preload 脚本路径
 ipcMain.handle('get-webview-preload-path', () => {
   return path.join(__dirname, '..', 'preload', 'webview-preload.js');
@@ -3531,9 +3561,13 @@ ipcMain.handle('get-window-sources', async () => {
     const { desktopCapturer } = require('electron');
     const sources = await desktopCapturer.getSources({
       types: ['window'],
-      thumbnailSize: { width: 1920, height: 1080 }
+      thumbnailSize: { width: 1920, height: 1080 },
+      fetchWindowIcons: true
     });
     log.info(`Found ${sources.length} window sources`);
+    sources.forEach(source => {
+      log.info(`Window source: id=${source.id}, name=${source.name}`);
+    });
     return sources;
   } catch (error) {
     log.error('Failed to get window sources:', error);
@@ -3608,7 +3642,7 @@ ipcMain.handle('save-video-data', async (event, taskId, data) => {
       throw new Error(`Task directory not found: ${taskId}`);
     }
 
-    // 保存视频数据为 webm 文件
+    // 保存视频数据为 webm 文件（使用 .webm 扩展名，但内容可能是 webm 或 mp4 格式）
     const videoPath = path.join(taskDir, 'video', 'recording.webm');
     fs.writeFileSync(videoPath, buffer);
     
@@ -3619,10 +3653,19 @@ ipcMain.handle('save-video-data', async (event, taskId, data) => {
     const ffmpegPath = globalState.ffmpegManager ? globalState.ffmpegManager.ffmpegPath : 'ffmpeg';
     
     return new Promise((resolve, reject) => {
+      // 检查 FFmpeg 是否可用
+      if (!ffmpegPath) {
+        log.error('FFmpeg is not available, cannot convert video');
+        // 如果 FFmpeg 不可用，直接返回 webm 文件路径
+        resolve({ success: true, path: videoPath, format: 'webm' });
+        return;
+      }
+      
       const { spawn } = require('child_process');
       const encoder = process.platform === 'darwin' ? 'h264_videotoolbox' : 'libx264';
       
       const args = [
+        '-fflags', '+genpts',  // 生成时间戳
         '-i', videoPath,
         '-c:v', encoder,
         '-pix_fmt', 'yuv420p',
@@ -3676,8 +3719,10 @@ ipcMain.handle('save-video-data', async (event, taskId, data) => {
           }
           resolve({ success: true, path: mp4Path });
         } else {
-          log.error('FFmpeg conversion failed:', stderr);
-          reject(new Error(`FFmpeg exited with code ${code}`));
+          log.error('FFmpeg conversion failed with code:', code);
+          log.error('FFmpeg stderr:', stderr);
+          log.error('FFmpeg command:', ffmpegPath, args.join(' '));
+          reject(new Error(`FFmpeg exited with code ${code}: ${stderr}`));
         }
       });
       
@@ -3715,7 +3760,7 @@ ipcMain.handle('start-replay', async (event, { taskId, url }) => {
 });
 
 // 应用生命周期
-app.whenReady().then(() => {
+app.whenReady().then(async () => {
   // 记录启动日志（帮助诊断 Windows 启动问题）
   log.info('========================================');
   log.info('Sentinel Browser 启动');
@@ -3728,6 +3773,22 @@ app.whenReady().then(() => {
   log.info(`应用路径: ${app.getAppPath()}`);
   log.info(`是否打包: ${app.isPackaged}`);
   log.info('========================================');
+
+  // macOS 屏幕录制权限检查
+  if (process.platform === 'darwin') {
+    try {
+      const screenCaptureStatus = systemPreferences.getMediaAccessStatus('screen');
+      log.info('Screen capture permission status:', screenCaptureStatus);
+      
+      if (screenCaptureStatus !== 'granted') {
+        log.info('Requesting screen capture permission...');
+        const granted = await systemPreferences.askForMediaAccess('screen');
+        log.info('Screen capture permission granted:', granted);
+      }
+    } catch (error) {
+      log.error('Failed to check/request screen capture permission:', error);
+    }
+  }
 
   // 确保在应用 ready 时初始化管理器
   initializeManagers();

@@ -4,8 +4,8 @@
   "description": "Industrial-grade web application data collector for VLA model training",
   "main": "src/main/main.js",
   "scripts": {
-    "start": "electron . --no-sandbox --disable-gpu --disable-software-rasterizer --disable-features=IsolateOrigins,site-per-process",
-    "dev": "NODE_ENV=development electron . --no-sandbox --disable-gpu --disable-software-rasterizer --disable-features=IsolateOrigins,site-per-process",
+    "start": "electron . --no-sandbox --disable-features=IsolateOrigins,site-per-process",
+    "dev": "NODE_ENV=development electron . --no-sandbox --disable-features=IsolateOrigins,site-per-process",
     "build": "electron-builder",
     "build:mac": "electron-builder --mac",
     "build:win": "electron-builder --win",
@@ -87,7 +87,11 @@
           ]
         }
       ],
-      "icon": "assets/icon.icns"
+      "icon": "assets/icon.icns",
+      "hardenedRuntime": true,
+      "gatekeeperAssess": false,
+      "entitlements": "build/entitlements.mac.plist",
+      "entitlementsInherit": "build/entitlements.mac.plist"
     },
     "win": {
       "target": [

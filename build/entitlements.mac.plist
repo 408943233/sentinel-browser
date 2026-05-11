@@ -30,6 +30,10 @@
     <key>com.apple.security.device.microphone</key>
     <true/>
     
+    <!-- 屏幕录制权限 -->
+    <key>com.apple.security.screen-recording</key>
+    <true/>
+    
     <!-- 自动化权限 -->
     <key>com.apple.security.automation.apple-events</key>
     <true/>

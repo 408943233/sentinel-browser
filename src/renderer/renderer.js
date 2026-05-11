@@ -769,8 +769,13 @@ class SentinelRenderer {
       this.collapseSidebar();
 
       // 启动视频录制
+      console.log('[Sentinel] recordVideo option:', config.options.recordVideo);
       if (config.options.recordVideo) {
+        console.log('[Sentinel] Calling startVideoRecording...');
         await this.startVideoRecording(taskId);
+        console.log('[Sentinel] startVideoRecording completed');
+      } else {
+        console.log('[Sentinel] Video recording disabled');
       }
       
       // 加载URL
@@ -837,13 +842,11 @@ class SentinelRenderer {
       // 停止视频录制
       await this.stopVideoRecording();
 
+      // 显示视频处理进度条
+      this.showSnapshotProgressModal('正在处理视频...');
+
       // 检查是否启用了截图功能
       const captureScreenshots = this.currentTask?.config?.options?.captureScreenshots || false;
-      
-      // 只有在启用了截图功能时才显示进度条
-      if (captureScreenshots) {
-        this.showSnapshotProgressModal();
-      }
 
       // 停止录制（这会触发视频转换和截图处理）
       await window.sentinelAPI.stopRecording();
@@ -854,13 +857,16 @@ class SentinelRenderer {
       // 更新UI
       this.updateRecordingUI(false);
 
+      // 隐藏进度条
+      this.hideSnapshotProgressModal();
+
       // 展开侧边栏
       this.expandSidebar();
 
       // 刷新任务列表
       this.loadTasks();
 
-      console.log('[Sentinel] Task stopped, waiting for snapshot extraction...');
+      console.log('[Sentinel] Task stopped successfully');
     } catch (error) {
       console.error('[Sentinel] Failed to stop task:', error);
       this.hideSnapshotProgressModal();
@@ -948,6 +954,7 @@ class SentinelRenderer {
         source = sources[0];
       }
 
+      console.log('[Sentinel] Available window sources:', sources.map(s => ({ id: s.id, name: s.name })));
       console.log('[Sentinel] Using window source:', source.id, source.name);
 
       // 等待窗口准备好（Windows 需要额外时间）
@@ -957,52 +964,36 @@ class SentinelRenderer {
         await new Promise(resolve => setTimeout(resolve, 1000));
       }
 
-      // 使用 getUserMedia 获取窗口流
-      let stream;
-      try {
-        stream = await navigator.mediaDevices.getUserMedia({
-          audio: false,
-          video: {
-            mandatory: {
-              chromeMediaSource: 'desktop',
-              chromeMediaSourceId: source.id,
-              minWidth: 1280,
-              maxWidth: 1920,
-              minHeight: 720,
-              maxHeight: 1080
-            }
+      // 使用 getUserMedia 获取窗口流（初始版本实现）
+      const stream = await navigator.mediaDevices.getUserMedia({
+        audio: false,
+        video: {
+          mandatory: {
+            chromeMediaSource: 'desktop',
+            chromeMediaSourceId: source.id,
+            minWidth: 1280,
+            maxWidth: 1920,
+            minHeight: 720,
+            maxHeight: 1080
           }
-        });
-      } catch (mediaError) {
-        console.error('[Sentinel] Failed to get user media:', mediaError);
-        // 尝试使用屏幕录制作为备选
-        console.log('[Sentinel] Trying screen capture as fallback...');
-        try {
-          const screenSources = await window.sentinelAPI.getScreenSources();
-          if (screenSources && screenSources.length > 0) {
-            stream = await navigator.mediaDevices.getUserMedia({
-              audio: false,
-              video: {
-                mandatory: {
-                  chromeMediaSource: 'desktop',
-                  chromeMediaSourceId: screenSources[0].id,
-                  minWidth: 1280,
-                  maxWidth: 1920,
-                  minHeight: 720,
-                  maxHeight: 1080
-                }
-              }
-            });
-          }
-        } catch (fallbackError) {
-          console.error('[Sentinel] Fallback also failed:', fallbackError);
-          throw mediaError;
         }
-      }
+      });
 
       this.recordingStream = stream;
 
-      // 使用 MediaRecorder 录制
+      // 检查视频轨道设置
+      const videoTrack = stream.getVideoTracks()[0];
+      if (videoTrack) {
+        const settings = videoTrack.getSettings();
+        console.log('[Sentinel] Video track settings:', settings);
+        
+        // 监听轨道结束事件
+        videoTrack.onended = () => {
+          console.log('[Sentinel] Video track ended');
+        };
+      }
+
+      // 使用 MediaRecorder 录制（初始版本实现）
       this.mediaRecorder = new MediaRecorder(stream, {
         mimeType: 'video/webm;codecs=vp9',
         videoBitsPerSecond: 5000000
@@ -1047,11 +1038,15 @@ class SentinelRenderer {
     }
 
     try {
+      // 使用 MediaRecorder 的 MIME 类型
+      const mimeType = this.mediaRecorder ? this.mediaRecorder.mimeType : 'video/webm';
+      console.log('[Sentinel] Creating blob with MIME type:', mimeType);
+      
       // 合并所有数据块
-      const blob = new Blob(this.recordedChunks, { type: 'video/webm' });
+      const blob = new Blob(this.recordedChunks, { type: mimeType });
       const arrayBuffer = await blob.arrayBuffer();
 
-      console.log('[Sentinel] Sending video data to main process, size:', arrayBuffer.byteLength);
+      console.log('[Sentinel] Sending video data to main process, size:', arrayBuffer.byteLength, 'chunks:', this.recordedChunks.length);
 
       // 通过 IPC 发送视频数据到主进程（使用 Uint8Array 代替 Buffer）
       if (window.sentinelAPI && window.sentinelAPI.saveVideoData) {
@@ -1354,13 +1349,13 @@ class SentinelRenderer {
   }
 
   // 显示截图处理进度模态框
-  showSnapshotProgressModal() {
+  showSnapshotProgressModal(message) {
     const modal = document.getElementById('snapshot-progress-modal');
     if (modal) {
       modal.classList.add('active');
     }
     // 初始化进度
-    this.updateSnapshotProgress(0, 0, 0);
+    this.updateSnapshotProgress(0, 0, 0, message);
   }
 
   // 隐藏截图处理进度模态框
@@ -1372,7 +1367,7 @@ class SentinelRenderer {
   }
 
   // 更新截图处理进度
-  updateSnapshotProgress(current, total, percent) {
+  updateSnapshotProgress(current, total, percent, message) {
     const progressFill = document.getElementById('snapshot-progress-fill');
     const progressText = document.getElementById('snapshot-progress-text');
     const progressCount = document.getElementById('snapshot-progress-count');
@@ -1381,7 +1376,9 @@ class SentinelRenderer {
       progressFill.style.width = percent + '%';
     }
     if (progressText) {
-      if (percent === 0) {
+      if (message) {
+        progressText.textContent = message;
+      } else if (percent === 0) {
         progressText.textContent = '准备中...';
       } else if (percent === 100) {
         progressText.textContent = '处理完成';
