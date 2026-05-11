@@ -88,8 +88,7 @@
             "x64"
           ]
         }
-      ],
-      "icon": "assets/icon_256x256.png"
+      ]
     },
     "nsis": {
       "oneClick": true,
@@ -102,8 +101,7 @@
       "deleteAppDataOnUninstall": false,
       "warningsAsErrors": false,
       "runAfterFinish": true,
-      "menuCategory": false,
-      "include": "build/installer.nsh"
+      "menuCategory": false
     },
     "portable": {
       "artifactName": "${productName}-Portable-${version}.${ext}"
