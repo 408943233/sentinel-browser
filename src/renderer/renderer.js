@@ -475,6 +475,11 @@ class SentinelRenderer {
 
     // 监听加载失败事件
     webview.addEventListener('did-fail-load', (e) => {
+      // 忽略 ERR_ABORTED (-3) 错误，这通常是正常的重定向或取消
+      if (e.errorCode === -3) {
+        console.log('[Sentinel] Webview load aborted (normal for redirects):', e.validatedURL);
+        return;
+      }
       console.error('[Sentinel] Webview failed to load:', e.errorCode, e.errorDescription, e.validatedURL);
     });
 
@@ -946,7 +951,8 @@ class SentinelRenderer {
       console.log('[Sentinel] Using window source:', source.id, source.name);
 
       // 等待窗口准备好（Windows 需要额外时间）
-      if (process.platform === 'win32') {
+      const platform = await window.sentinelAPI.getPlatform();
+      if (platform === 'win32') {
         console.log('[Sentinel] Waiting for window to be ready on Windows...');
         await new Promise(resolve => setTimeout(resolve, 1000));
       }

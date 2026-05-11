@@ -119,6 +119,9 @@ contextBridge.exposeInMainWorld('sentinelAPI', {
   // 获取当前 webContents ID
   getWebContentsId: () => ipcRenderer.invoke('get-webcontents-id'),
 
+  // 获取平台信息
+  getPlatform: () => ipcRenderer.invoke('get-platform'),
+
   // DOM操作
   getDOMSnapshot: () => {
     return {

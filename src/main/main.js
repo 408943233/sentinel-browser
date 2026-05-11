@@ -3499,6 +3499,11 @@ ipcMain.handle('get-webcontents-id', (event) => {
   return event.sender.id;
 });
 
+// 获取平台信息
+ipcMain.handle('get-platform', () => {
+  return process.platform;
+});
+
 // 获取 webview preload 脚本路径
 ipcMain.handle('get-webview-preload-path', () => {
   return path.join(__dirname, '..', 'preload', 'webview-preload.js');
