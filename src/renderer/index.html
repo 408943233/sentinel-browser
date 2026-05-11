@@ -1,0 +1,312 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Sentinel Browser 2.0</title>
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <div id="app">
+    <!-- 顶部工具栏 -->
+    <header class="toolbar">
+      <div class="toolbar-left">
+        <div class="logo">
+          <span class="logo-icon">🛡️</span>
+          <span class="logo-text">Sentinel Browser</span>
+        </div>
+      </div>
+      
+      <div class="toolbar-center">
+        <!-- 导航控制 -->
+        <div class="nav-controls">
+          <button id="btn-back" class="nav-btn" title="后退">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <polyline points="15 18 9 12 15 6"></polyline>
+            </svg>
+          </button>
+          <button id="btn-forward" class="nav-btn" title="前进">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <polyline points="9 18 15 12 9 6"></polyline>
+            </svg>
+          </button>
+          <button id="btn-refresh" class="nav-btn" title="刷新">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <polyline points="23 4 23 10 17 10"></polyline>
+              <path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"></path>
+            </svg>
+          </button>
+        </div>
+        
+        <!-- 地址栏 -->
+        <div class="address-bar">
+          <input type="text" id="url-input" placeholder="输入网址或搜索..." />
+          <button id="btn-go" class="go-btn">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <polygon points="5 3 19 12 5 21 5 3"></polygon>
+            </svg>
+          </button>
+        </div>
+      </div>
+      
+      <div class="toolbar-right">
+        <!-- 任务控制 -->
+        <div class="task-controls">
+          <button id="btn-start-task" class="task-btn primary">
+            <span class="btn-icon">▶️</span>
+            <span>开始任务</span>
+          </button>
+          <button id="btn-pause-task" class="task-btn" disabled>
+            <span class="btn-icon">⏸️</span>
+            <span>暂停</span>
+          </button>
+          <button id="btn-stop-task" class="task-btn danger" disabled>
+            <span class="btn-icon">⏹️</span>
+            <span>结束</span>
+          </button>
+        </div>
+        
+        <!-- 状态指示器 -->
+        <div class="status-indicator" id="status-indicator">
+          <span class="status-dot"></span>
+          <span class="status-text">就绪</span>
+        </div>
+      </div>
+    </header>
+    
+    <!-- 主内容区 -->
+    <div class="main-content">
+      <!-- 侧边栏 -->
+      <aside class="sidebar" id="sidebar">
+        <button class="sidebar-toggle" id="sidebar-toggle" title="收起/展开侧边栏">
+          <span class="toggle-icon">◀</span>
+        </button>
+        <div class="sidebar-content">
+          <div class="sidebar-section">
+            <h3>任务列表</h3>
+            <div id="task-list" class="task-list">
+              <div class="empty-state">暂无任务</div>
+            </div>
+          </div>
+          
+          <div class="sidebar-section">
+            <h3>统计信息</h3>
+            <div class="stats">
+              <div class="stat-item">
+                <span class="stat-label">录制时长</span>
+                <span class="stat-value" id="recording-time">00:00:00</span>
+              </div>
+              <div class="stat-item">
+                <span class="stat-label">事件数量</span>
+                <span class="stat-value" id="event-count">0</span>
+              </div>
+              <div class="stat-item">
+                <span class="stat-label">API请求</span>
+                <span class="stat-value" id="api-count">0</span>
+              </div>
+            </div>
+          </div>
+        </div>
+      </aside>
+      
+      <!-- 浏览器视图 -->
+      <main class="browser-view">
+        <!-- 标签卡栏 -->
+        <div class="tab-bar" id="tab-bar">
+          <div class="tab-list" id="tab-list">
+            <!-- 标签卡将动态添加到这里 -->
+          </div>
+          <button class="tab-add-btn" id="btn-add-tab" title="新建标签卡">+</button>
+        </div>
+        
+        <!-- 浏览器容器 -->
+        <div id="browser-container" class="browser-container">
+          <div class="welcome-screen">
+            <div class="welcome-content">
+              <div class="welcome-icon">🛡️</div>
+              <h1>Sentinel Browser 2.0</h1>
+              <p>工业级Web应用数据采集器</p>
+              <div class="welcome-features">
+                <div class="feature">
+                  <span class="feature-icon">📹</span>
+                  <span>视频录制</span>
+                </div>
+                <div class="feature">
+                  <span class="feature-icon">🕷️</span>
+                  <span>Shadow DOM遍历</span>
+                </div>
+                <div class="feature">
+                  <span class="feature-icon">💾</span>
+                  <span>状态捕获</span>
+                </div>
+                <div class="feature">
+                  <span class="feature-icon">📊</span>
+                  <span>API监控</span>
+                </div>
+              </div>
+              <button id="btn-start-welcome" class="start-btn">开始新任务</button>
+            </div>
+          </div>
+        </div>
+      </main>
+    </div>
+    
+    <!-- 底部状态栏 -->
+    <footer class="status-bar">
+      <div class="status-left">
+        <span id="current-url">准备就绪</span>
+      </div>
+      <div class="status-right">
+        <span id="disk-space">磁盘空间: 检查中...</span>
+        <span id="recording-status">未录制</span>
+      </div>
+    </footer>
+  </div>
+  
+  <!-- 任务配置模态框 -->
+  <div id="task-modal" class="modal">
+    <div class="modal-content">
+      <div class="modal-header">
+        <h2>配置新任务</h2>
+        <button class="close-btn" id="close-modal">&times;</button>
+      </div>
+      <div class="modal-body">
+        <form id="task-form">
+          <div class="form-group">
+            <label for="task-name">任务名称</label>
+            <input type="text" id="task-name" placeholder="例如：开户流程录制" required>
+          </div>
+          <div class="form-group">
+            <label for="task-operator">操作人姓名</label>
+            <input type="text" id="task-operator" placeholder="请输入操作人姓名" required>
+          </div>
+          <div class="form-group">
+            <label for="task-url">起始URL</label>
+            <input type="text" id="task-url" placeholder="https://example.com" required>
+          </div>
+          <div class="form-group">
+            <label for="task-description">任务描述</label>
+            <textarea id="task-description" rows="3" placeholder="描述这个任务的目标..."></textarea>
+          </div>
+          <div class="form-group">
+            <label>录制选项</label>
+            <div class="checkbox-group">
+              <label class="checkbox-label">
+                <input type="checkbox" id="record-video" checked>
+                <span>录制视频</span>
+              </label>
+              <label class="checkbox-label">
+                <input type="checkbox" id="capture-dom" checked>
+                <span>捕获DOM变化</span>
+              </label>
+              <label class="checkbox-label">
+                <input type="checkbox" id="capture-api" checked>
+                <span>监控API请求</span>
+              </label>
+              <label class="checkbox-label">
+                <input type="checkbox" id="capture-state" checked>
+                <span>捕获应用状态</span>
+              </label>
+              <label class="checkbox-label">
+                <input type="checkbox" id="capture-screenshots">
+                <span>生成事件截图</span>
+              </label>
+            </div>
+          </div>
+        </form>
+      </div>
+      <div class="modal-footer">
+        <button type="button" class="btn-secondary" id="btn-cancel">取消</button>
+        <button type="submit" class="btn-primary" id="btn-confirm-start">开始录制</button>
+      </div>
+    </div>
+  </div>
+  
+  <!-- 截图处理进度模态框 -->
+  <div id="snapshot-progress-modal" class="modal">
+    <div class="modal-content">
+      <div class="modal-header">
+        <h2>正在处理截图</h2>
+      </div>
+      <div class="modal-body">
+        <p class="progress-description">正在从视频中截取屏幕快照，请稍候...</p>
+        <div class="snapshot-progress">
+          <div class="progress-bar">
+            <div class="progress-fill" id="snapshot-progress-fill"></div>
+          </div>
+          <div class="progress-info">
+            <span class="progress-text" id="snapshot-progress-text">准备中...</span>
+            <span class="progress-count" id="snapshot-progress-count">0 / 0</span>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- 数据关联进度模态框 -->
+  <div id="correlation-progress-modal" class="modal">
+    <div class="modal-content">
+      <div class="modal-header">
+        <h2>正在关联数据</h2>
+      </div>
+      <div class="modal-body">
+        <p class="progress-description" id="correlation-progress-description">正在读取数据文件...</p>
+        <div class="snapshot-progress">
+          <div class="progress-bar">
+            <div class="progress-fill" id="correlation-progress-fill"></div>
+          </div>
+          <div class="progress-info">
+            <span class="progress-text" id="correlation-progress-text">准备中...</span>
+            <span class="progress-count" id="correlation-progress-count">0 / 0</span>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- 导出模态框 -->
+  <div id="export-modal" class="modal">
+    <div class="modal-content">
+      <div class="modal-header">
+        <h2>任务已完成</h2>
+        <button class="close-btn" id="close-export-modal">&times;</button>
+      </div>
+      <div class="modal-body">
+        <div class="export-info">
+          <p class="info-text">📁 <strong>任务记录已保存</strong></p>
+          <p class="info-desc">所有录制数据（包括视频、DOM快照、网络请求等）已保存到任务文件夹中。</p>
+        </div>
+        <div class="export-options">
+          <div class="export-option">
+            <input type="radio" name="export-format" id="export-zip" value="zip" checked>
+            <label for="export-zip">
+              <span class="option-icon">📦</span>
+              <span class="option-title">导出为 ZIP 压缩包</span>
+              <span class="option-desc">将任务文件夹打包为 ZIP 文件，方便分享和备份</span>
+            </label>
+          </div>
+        </div>
+        <div class="export-note">
+          <p class="note-text">💡 提示：导出只是将记录文件夹压缩为 ZIP，原始记录文件夹仍然保留在原地。</p>
+        </div>
+      </div>
+      <div class="modal-footer">
+        <button type="button" class="btn-secondary" id="btn-open-folder">
+          <span class="btn-icon">📂</span>
+          打开记录文件夹
+        </button>
+        <button type="button" class="btn-secondary" id="btn-cancel-export">暂不导出</button>
+        <button type="button" class="btn-primary" id="btn-confirm-export">导出 ZIP</button>
+      </div>
+      <div class="export-progress" id="export-progress" style="display: none;">
+        <div class="progress-bar">
+          <div class="progress-fill" id="progress-fill"></div>
+        </div>
+        <div class="progress-text" id="progress-text">准备导出...</div>
+      </div>
+    </div>
+  </div>
+  
+  <script src="renderer.js"></script>
+</body>
+</html>

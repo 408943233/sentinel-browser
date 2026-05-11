@@ -1,0 +1,49 @@
+{
+  "timestamp": 1714286730123,
+  "video_time": "00:02:15.500",
+  "task_id": "acc_opening_001",
+  "sub_task_id": "subtask_identity_verification",
+  "window_context": {
+    "window_id": "tab_02",
+    "parent_window_id": "tab_01",
+    "url": "https://biz-system.com/preview/..."
+  },
+  "user_context": {
+    "user_id": "clerk_99",
+    "role": "verifier",
+    "permissions": ["view_docs"],
+    "env": "prod_v8"
+  },
+  "event_details": {
+    "action": "click",
+    "semantic_label": "Confirm Identity",
+    "dom_path": "//div[@id='root']/button",
+    "shadow_dom_path": "custom-element::shadow-root > .btn",
+    "coordinates": {
+      "x": 850,
+      "y": 420
+    }
+  },
+  "file_io": {
+    "type": "preview",
+    "local_path": "previews/id_card.pdf",
+    "content_summary": "Extracted text..."
+  },
+  "page_state": {
+    "fingerprint": "hash_123",
+    "has_errors": false,
+    "is_loading": false,
+    "mutations": []
+  },
+  "network_correlation": {
+    "api_requests": ["req_9928"],
+    "response_status": 200
+  },
+  "lineage": {
+    "previous_event_id": "evt_041",
+    "next_event_id": "evt_043"
+  },
+  "_metadata": {
+    "event_id": "evt_1714286730123_001"
+  }
+}
