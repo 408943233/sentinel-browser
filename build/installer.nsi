@@ -27,7 +27,7 @@ RequestExecutionLevel user  ; 不需要管理员权限
 
 ; 页面
 !insertmacro MUI_PAGE_WELCOME
-!insertmacro MUI_PAGE_LICENSE "..\LICENSE"  ; 如果有license文件
+; License page removed - using default electron-builder configuration
 !insertmacro MUI_PAGE_DIRECTORY
 !insertmacro MUI_PAGE_INSTFILES
 !insertmacro MUI_PAGE_FINISH
