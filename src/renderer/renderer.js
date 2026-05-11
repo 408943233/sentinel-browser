@@ -945,20 +945,54 @@ class SentinelRenderer {
 
       console.log('[Sentinel] Using window source:', source.id, source.name);
 
+      // 等待窗口准备好（Windows 需要额外时间）
+      if (process.platform === 'win32') {
+        console.log('[Sentinel] Waiting for window to be ready on Windows...');
+        await new Promise(resolve => setTimeout(resolve, 1000));
+      }
+
       // 使用 getUserMedia 获取窗口流
-      const stream = await navigator.mediaDevices.getUserMedia({
-        audio: false,
-        video: {
-          mandatory: {
-            chromeMediaSource: 'desktop',
-            chromeMediaSourceId: source.id,
-            minWidth: 1280,
-            maxWidth: 1920,
-            minHeight: 720,
-            maxHeight: 1080
+      let stream;
+      try {
+        stream = await navigator.mediaDevices.getUserMedia({
+          audio: false,
+          video: {
+            mandatory: {
+              chromeMediaSource: 'desktop',
+              chromeMediaSourceId: source.id,
+              minWidth: 1280,
+              maxWidth: 1920,
+              minHeight: 720,
+              maxHeight: 1080
+            }
           }
+        });
+      } catch (mediaError) {
+        console.error('[Sentinel] Failed to get user media:', mediaError);
+        // 尝试使用屏幕录制作为备选
+        console.log('[Sentinel] Trying screen capture as fallback...');
+        try {
+          const screenSources = await window.sentinelAPI.getScreenSources();
+          if (screenSources && screenSources.length > 0) {
+            stream = await navigator.mediaDevices.getUserMedia({
+              audio: false,
+              video: {
+                mandatory: {
+                  chromeMediaSource: 'desktop',
+                  chromeMediaSourceId: screenSources[0].id,
+                  minWidth: 1280,
+                  maxWidth: 1920,
+                  minHeight: 720,
+                  maxHeight: 1080
+                }
+              }
+            });
+          }
+        } catch (fallbackError) {
+          console.error('[Sentinel] Fallback also failed:', fallbackError);
+          throw mediaError;
         }
-      });
+      }
 
       this.recordingStream = stream;
 
