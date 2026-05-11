@@ -340,8 +340,14 @@ function createMainWindow() {
       webviewTag: true
     },
     titleBarStyle: 'default',
-    show: false
+    show: false,
+    autoHideMenuBar: true
   });
+
+  // Windows 平台隐藏菜单栏
+  if (process.platform === 'win32') {
+    mainWindow.setMenuBarVisibility(false);
+  }
 
   // 加载渲染进程
   mainWindow.loadFile(path.join(__dirname, '..', 'renderer', 'index.html'));
@@ -1186,7 +1192,7 @@ async function startRecording(taskConfig = {}) {
 
   // Windows 平台：让用户选择存储目录
   if (process.platform === 'win32' && !STORAGE_PATH) {
-    const mainWindow = globalState.windows[0]?.window;
+    const mainWindow = globalState.windows.size > 0 ? globalState.windows.values().next().value.window : null;
     const selectedPath = await selectStorageDirectory(mainWindow);
     if (!selectedPath) {
       throw new Error('未选择存储目录');
@@ -2547,9 +2553,17 @@ ipcMain.handle('show-in-folder', async (event, taskId) => {
     }
 
     // 在文件夹中显示
-    shell.showItemInFolder(taskDir);
-    log.info(`Opened task directory in folder: ${taskDir}`);
-    return { success: true };
+    try {
+      // Windows 上需要确保路径格式正确
+      const normalizedPath = path.normalize(taskDir);
+      log.info(`Opening folder with normalized path: ${normalizedPath}`);
+      const result = shell.showItemInFolder(normalizedPath);
+      log.info(`Opened task directory in folder: ${normalizedPath}, result:`, result);
+      return { success: true };
+    } catch (err) {
+      log.error('shell.showItemInFolder failed:', err);
+      throw err;
+    }
   } catch (error) {
     log.error('Failed to show task in folder:', error);
     throw error;
