@@ -17,14 +17,27 @@ class FFmpegManager {
    * 获取 FFmpeg 可执行文件路径
    */
   getFFmpegPath() {
+    // 检查本地 FFmpeg
     const localFFmpeg = path.join(__dirname, '..', '..', 'bin', 'ffmpeg');
+    const localFFmpegExe = path.join(__dirname, '..', '..', 'bin', 'ffmpeg.exe');
+
     if (fs.existsSync(localFFmpeg)) {
       log.info('Using local FFmpeg:', localFFmpeg);
       return localFFmpeg;
     }
 
+    if (fs.existsSync(localFFmpegExe)) {
+      log.info('Using local FFmpeg (Windows):', localFFmpegExe);
+      return localFFmpegExe;
+    }
+
+    // 检查系统 FFmpeg
     try {
-      execSync('which ffmpeg');
+      if (process.platform === 'win32') {
+        execSync('where ffmpeg', { stdio: 'ignore' });
+      } else {
+        execSync('which ffmpeg', { stdio: 'ignore' });
+      }
       log.info('Using system FFmpeg');
       return 'ffmpeg';
     } catch {
