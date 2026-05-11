@@ -1151,10 +1151,19 @@ function getFreeSpace(directory) {
   try {
     if (process.platform === 'win32') {
       const { execSync } = require('child_process');
-      const output = execSync(`wmic logicaldisk where "DeviceID='${path.parse(directory).root.replace('\\', '')}'" get FreeSpace`, { encoding: 'utf-8' });
+      // 获取盘符，例如 C:\ -> C:
+      const root = path.parse(directory).root;
+      const driveLetter = root.charAt(0).toUpperCase() + ':';
+
+      log.info('Checking free space for drive:', driveLetter);
+
+      // 使用 wmic 获取磁盘空间
+      const output = execSync(`wmic logicaldisk where "DeviceID='${driveLetter}'" get FreeSpace`, { encoding: 'utf-8' });
       const lines = output.trim().split('\n');
       if (lines.length > 1) {
-        return parseInt(lines[1].trim());
+        const freeSpace = parseInt(lines[1].trim());
+        log.info('Free space on', driveLetter, ':', freeSpace, 'bytes');
+        return freeSpace;
       }
     } else {
       const { execSync } = require('child_process');
@@ -1163,6 +1172,7 @@ function getFreeSpace(directory) {
     }
   } catch (error) {
     log.error('Failed to get free space:', error);
+    // 返回无限空间，让应用继续运行
     return Infinity;
   }
 }
