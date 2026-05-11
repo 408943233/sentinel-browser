@@ -211,9 +211,15 @@ function initializeManagers() {
     log.debug('Managers already initialized, skipping...');
     return;
   }
-  
+
   log.info('Initializing managers...');
-  
+
+  // 确保 STORAGE_PATH 已设置
+  if (!STORAGE_PATH) {
+    log.warn('STORAGE_PATH not set, using default path');
+    STORAGE_PATH = getDefaultStoragePath();
+  }
+
   globalState.ffmpegManager = new FFmpegManager();
   globalState.watchdogManager = new WatchdogManager();
   globalState.errorDetector = new ErrorDetector();
@@ -222,7 +228,7 @@ function initializeManagers() {
   globalState.cdpManager = new CDPManager();
   globalState.dataSchemaManager = new DataSchemaManager();
   globalState.stateInjector = new StateInjector();
-  
+
   log.info('Managers initialized successfully');
 }
 

@@ -8,8 +8,11 @@ const log = require('electron-log');
  */
 class StateManager {
   constructor(storagePath) {
-    this.storagePath = storagePath;
-    this.statesDir = path.join(storagePath, 'states');
+    // 如果 storagePath 为 null，使用默认临时目录
+    this.storagePath = storagePath || path.join(require('os').tmpdir(), 'sentinel-browser-states');
+    this.statesDir = path.join(this.storagePath, 'states');
+    
+    log.info('StateManager initialized with path:', this.storagePath);
     
     if (!fs.existsSync(this.statesDir)) {
       fs.mkdirSync(this.statesDir, { recursive: true });
