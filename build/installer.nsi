@@ -172,8 +172,7 @@ Section "Uninstall"
     RMDir "$SMPROGRAMS\Sentinel Browser"
     
     ; 询问是否删除用户数据
-    MessageBox MB_YESNO "是否删除用户数据目录？$
-这将会删除所有已保存的任务数据。" IDNO SkipDataDelete
+    MessageBox MB_YESNO "是否删除用户数据目录？这将会删除所有已保存的任务数据。" IDNO SkipDataDelete
         RMDir /r "$INSTDIR\userdata"
         RMDir /r "$INSTDIR\output"
         RMDir /r "$INSTDIR\logs"
