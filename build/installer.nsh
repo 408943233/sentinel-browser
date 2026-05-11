@@ -3,11 +3,6 @@
 
 !include "LogicLib.nsh"
 
-; 宏：自定义安装头
-!macro customHeader
-  Name "Sentinel Browser"
-!macroend
-
 ; 宏：自定义安装页面初始化
 !macro customInit
   ; 检查 VC++ Redistributable
