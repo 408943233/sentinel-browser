@@ -177,6 +177,10 @@ function clearDynamicResources() {
 let STORAGE_PATH = null;
 
 const getDefaultStoragePath = () => {
+  // Windows 使用用户数据目录，macOS/Linux 使用 /tmp
+  if (process.platform === 'win32') {
+    return path.join(app.getPath('userData'), 'SentinelBrowser', 'collections');
+  }
   // 使用 /tmp 目录避免 macOS iCloud 和权限问题
   return path.join('/tmp', 'SentinelBrowser', 'collections');
 };
@@ -1192,7 +1196,7 @@ async function startRecording(taskConfig = {}) {
 
   // Windows 平台：让用户选择存储目录
   if (process.platform === 'win32' && !STORAGE_PATH) {
-    const mainWindow = globalState.windows.size > 0 ? globalState.windows.values().next().value.window : null;
+    const mainWindow = BrowserWindow.getFocusedWindow() || BrowserWindow.getAllWindows()[0];
     const selectedPath = await selectStorageDirectory(mainWindow);
     if (!selectedPath) {
       throw new Error('未选择存储目录');
@@ -2557,8 +2561,25 @@ ipcMain.handle('show-in-folder', async (event, taskId) => {
       // Windows 上需要确保路径格式正确
       const normalizedPath = path.normalize(taskDir);
       log.info(`Opening folder with normalized path: ${normalizedPath}`);
-      const result = shell.showItemInFolder(normalizedPath);
-      log.info(`Opened task directory in folder: ${normalizedPath}, result:`, result);
+      
+      // 先尝试使用 showItemInFolder
+      shell.showItemInFolder(normalizedPath);
+      
+      // Windows 上 showItemInFolder 可能不工作，使用 openPath 作为备选
+      if (process.platform === 'win32') {
+        setTimeout(() => {
+          shell.openPath(normalizedPath).then((result) => {
+            if (result) {
+              log.warn('openPath result:', result);
+            } else {
+              log.info('openPath succeeded');
+            }
+          }).catch((err) => {
+            log.error('openPath failed:', err);
+          });
+        }, 500);
+      }
+      
       return { success: true };
     } catch (err) {
       log.error('shell.showItemInFolder failed:', err);
