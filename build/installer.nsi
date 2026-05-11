@@ -88,21 +88,11 @@ Function InstallVCRedist
             DetailPrint "Visual C++ Redistributable 安装成功"
         ${Else}
             DetailPrint "Visual C++ Redistributable 安装失败，错误码: $0"
-            MessageBox MB_OK "Visual C++ Redistributable 安装失败。$
-$
-应用程序可能无法正常运行。$
-$
-请手动下载安装：$
-${VC_REDIST_URL}"
+            MessageBox MB_OK "Visual C++ Redistributable 安装失败。应用程序可能无法正常运行。请手动下载安装：${VC_REDIST_URL}"
         ${EndIf}
     ${Else}
         DetailPrint "下载失败: $DownloadResult"
-        MessageBox MB_OK "无法自动下载 Visual C++ Redistributable。$
-$
-请手动下载安装：$
-${VC_REDIST_URL}$
-$
-否则应用程序可能无法启动。"
+        MessageBox MB_OK "无法自动下载 Visual C++ Redistributable。请手动下载安装：${VC_REDIST_URL} 否则应用程序可能无法启动。"
     ${EndIf}
     
     ; 清理临时文件
