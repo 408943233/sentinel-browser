@@ -6,10 +6,16 @@ yarn-error.log*
 
 # Build output
 dist/
-build/
 *.exe
 *.dmg
 *.zip
+
+# Build resources (keep installer scripts)
+!build/
+build/*
+!build/installer.nsh
+!build/installer.nsi
+!build/entitlements.mac.plist
 
 # Environment
 .env
