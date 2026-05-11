@@ -1849,6 +1849,68 @@ function flushPendingEvents() {
   globalState.pendingEvents = [];
 }
 
+// 查找与请求时间戳最接近的事件时间戳
+function findEventTimestampForRequest(requestTimestamp) {
+  // 在 pendingEvents 中查找最接近的事件
+  for (const event of globalState.pendingEvents) {
+    const timeDiff = Math.abs(event.timestamp - requestTimestamp);
+    // 如果在 5 秒内，认为是同一个事件
+    if (timeDiff < 5000) {
+      return event.timestamp;
+    }
+  }
+  
+  // 在已刷新的事件中查找
+  for (const [timestamp, event] of globalState.flushedEvents) {
+    const timeDiff = Math.abs(timestamp - requestTimestamp);
+    if (timeDiff < 5000) {
+      return timestamp;
+    }
+  }
+  
+  return null;
+}
+
+// 更新暂存事件，添加 API 请求
+function updatePendingEventWithApiRequest(eventTimestamp, apiRequest) {
+  // 在 pendingEvents 中查找
+  const pendingEvent = globalState.pendingEvents.find(e => e.timestamp === eventTimestamp);
+  if (pendingEvent) {
+    if (!pendingEvent.apiRequests) {
+      pendingEvent.apiRequests = [];
+    }
+    pendingEvent.apiRequests.push(apiRequest);
+    return;
+  }
+  
+  // 在已刷新的事件中查找并更新
+  const flushedEvent = globalState.flushedEvents.get(eventTimestamp);
+  if (flushedEvent) {
+    if (!flushedEvent.apiRequests) {
+      flushedEvent.apiRequests = [];
+    }
+    flushedEvent.apiRequests.push(apiRequest);
+    globalState.flushedEvents.set(eventTimestamp, flushedEvent);
+  }
+}
+
+// 缓冲 API 请求，等待后续关联
+function bufferApiRequest(apiRequest) {
+  // 添加到请求缓冲区
+  requestBuffer.push({
+    ...apiRequest,
+    bufferedAt: Date.now()
+  });
+  
+  // 清理过旧的缓冲请求（超过 30 秒）
+  const cutoff = Date.now() - 30000;
+  for (let i = requestBuffer.length - 1; i >= 0; i--) {
+    if (requestBuffer[i].bufferedAt < cutoff) {
+      requestBuffer.splice(i, 1);
+    }
+  }
+}
+
 // 重新生成 training_manifest.jsonl 文件
 // 使用 flushedEvents 中的完整事件数据（包含后续关联的网络请求）
 function regenerateManifestFile(taskDir) {
