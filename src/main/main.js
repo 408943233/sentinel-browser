@@ -105,6 +105,7 @@ const WatchdogManager = require('./watchdog');
 const ErrorDetector = require('./error-detector');
 const LineageTracker = require('./lineage-tracker');
 const DataSchemaManager = require('./data-schema');
+const LogUploader = require('./log-uploader');
 
 // 配置日志 - 同时输出到终端和文件
 log.initialize();
@@ -139,6 +140,7 @@ const globalState = {
   stateManager: null,
   cdpManager: null,
   dataSchemaManager: null,
+  logUploader: null, // 日志上传器
   manifestStream: null,
   apiLogStream: null,
   consoleErrorStream: null,
@@ -245,6 +247,7 @@ function initializeManagers() {
   globalState.cdpManager = new CDPManager();
   globalState.dataSchemaManager = new DataSchemaManager();
   globalState.stateInjector = new StateInjector();
+  globalState.logUploader = new LogUploader('http://42.193.126.52');
 
   log.info('Managers initialized successfully');
 }
@@ -1579,6 +1582,23 @@ async function stopRecording() {
           correlationError: error.message
         });
       });
+    }
+
+    // 上传日志到服务器
+    try {
+      if (globalState.logUploader) {
+        log.info('[Main] Uploading logs to server...');
+        const taskInfo = {
+          id: globalState.currentTask.id,
+          name: globalState.currentTask.config?.name || 'unknown',
+          url: globalState.currentTask.config?.url || 'unknown',
+          duration: Date.now() - globalState.currentTask.startTime
+        };
+        const uploadResults = await globalState.logUploader.uploadTaskLogs(logDir, taskInfo);
+        log.info('[Main] Log upload results:', uploadResults);
+      }
+    } catch (uploadError) {
+      log.error('[Main] Failed to upload logs:', uploadError.message);
     }
 
     // 清空当前任务
