@@ -1532,12 +1532,14 @@ async function stopRecording() {
       return new Promise((resolve, reject) => {
         const { spawn } = require('child_process');
         
-        // 使用 process.execPath 作为 node 可执行文件（Electron 内置）
-        const nodePath = process.execPath;
-        log.info('Using Node.js from:', nodePath);
+        // 在 Electron 中以 Node.js 模式运行脚本
+        // 使用 ELECTRON_RUN_AS_NODE=1 让 Electron 像 Node.js 一样运行
+        const electronPath = process.execPath;
+        log.info('Running script with Electron as Node:', electronPath);
         
-        const child = spawn(nodePath, [scriptPath, globalState.currentTask.dir], {
-          stdio: ['inherit', 'pipe', 'pipe']
+        const child = spawn(electronPath, [scriptPath, globalState.currentTask.dir], {
+          stdio: ['inherit', 'pipe', 'pipe'],
+          env: { ...process.env, ELECTRON_RUN_AS_NODE: '1' }
         });
 
         let stdout = '';
@@ -2604,6 +2606,12 @@ ipcMain.handle('export-task', async (event, taskId) => {
 });
 
 ipcMain.handle('get-tasks', async () => {
+  // 如果 STORAGE_PATH 未设置，返回空数组
+  if (!STORAGE_PATH) {
+    log.warn('STORAGE_PATH not set, returning empty tasks list');
+    return [];
+  }
+  
   const tasks = [];
   const entries = fs.readdirSync(STORAGE_PATH, { withFileTypes: true });
 
@@ -2634,6 +2642,11 @@ ipcMain.handle('get-tasks', async () => {
 // 在文件夹中显示任务
 ipcMain.handle('show-in-folder', async (event, taskId) => {
   try {
+    // 如果 STORAGE_PATH 未设置，报错
+    if (!STORAGE_PATH) {
+      throw new Error('STORAGE_PATH not set');
+    }
+    
     const cleanTaskId = taskId.replace(/^task_/, '');
     let taskDir = path.join(STORAGE_PATH, taskId);
 
