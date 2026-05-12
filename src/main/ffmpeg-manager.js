@@ -3,6 +3,7 @@ const path = require('path');
 const fs = require('fs');
 const log = require('electron-log');
 const { execSync } = require('child_process');
+const { app } = require('electron');
 
 /**
  * FFmpeg 管理器 - 视频转换功能
@@ -15,11 +16,24 @@ class FFmpegManager {
 
   /**
    * 获取 FFmpeg 可执行文件路径
+   * 支持开发环境和打包后环境
    */
   getFFmpegPath() {
-    // 检查本地 FFmpeg
-    const localFFmpeg = path.join(__dirname, '..', '..', 'bin', 'ffmpeg');
-    const localFFmpegExe = path.join(__dirname, '..', '..', 'bin', 'ffmpeg.exe');
+    // 根据是否打包选择正确的路径
+    const isPackaged = app.isPackaged;
+    let localFFmpeg, localFFmpegExe;
+    
+    if (isPackaged) {
+      // 打包后，bin目录在 resources/bin/
+      localFFmpeg = path.join(process.resourcesPath, 'bin', 'ffmpeg');
+      localFFmpegExe = path.join(process.resourcesPath, 'bin', 'ffmpeg.exe');
+    } else {
+      // 开发环境，bin目录在项目根目录
+      localFFmpeg = path.join(__dirname, '..', '..', 'bin', 'ffmpeg');
+      localFFmpegExe = path.join(__dirname, '..', '..', 'bin', 'ffmpeg.exe');
+    }
+
+    log.info('Looking for FFmpeg at:', localFFmpeg, 'or', localFFmpegExe);
 
     if (fs.existsSync(localFFmpeg)) {
       log.info('Using local FFmpeg:', localFFmpeg);
@@ -41,7 +55,7 @@ class FFmpegManager {
       log.info('Using system FFmpeg');
       return 'ffmpeg';
     } catch {
-      log.warn('FFmpeg not found in PATH');
+      log.warn('FFmpeg not found in PATH or resources');
       return null;
     }
   }
