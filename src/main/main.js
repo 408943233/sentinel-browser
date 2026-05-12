@@ -1361,12 +1361,21 @@ async function startRecording(taskConfig = {}) {
 
   // 打开 training_manifest.jsonl（黄金文件，取代原 user_actions）
   const manifestPath = path.join(taskDir, 'training_manifest.jsonl');
-  globalState.manifestStream = fs.createWriteStream(manifestPath, { flags: 'a' });
   
-  // Windows: 等待流准备好再写入
+  // Windows: 不使用流写入，完全使用同步写入避免冲突
   if (process.platform === 'win32') {
-    // 使用同步写入确保文件立即创建
-    fs.writeFileSync(manifestPath, '');
+    // 确保文件存在
+    if (!fs.existsSync(manifestPath)) {
+      fs.writeFileSync(manifestPath, '');
+    }
+    // 创建一个虚拟流对象，用于兼容代码
+    globalState.manifestStream = {
+      write: () => {},
+      end: () => {},
+      uncork: () => {}
+    };
+  } else {
+    globalState.manifestStream = fs.createWriteStream(manifestPath, { flags: 'a' });
   }
 
   // 打开API流量日志
