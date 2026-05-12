@@ -212,6 +212,7 @@ async function processCorrelation() {
   console.log(`Time difference: ${firstEventTimestamp - earliestTimestamp}ms`);
 
   // 为每个事件关联网络数据
+  // 新逻辑：将每个网络请求关联到时间戳最接近的事件
   let associatedCount = 0;
   const usedApiRequests = new Set();
   const usedStaticResources = new Set();
@@ -219,82 +220,88 @@ async function processCorrelation() {
   
   const totalEvents = events.length;
 
-  for (let i = 0; i < events.length; i++) {
-    const event = events[i];
-    const eventUrl = event.window_context?.url || '';
-    const eventType = event.event_details?.action || '';
-    const eventTimestamp = event.timestamp;
-    const prevEvent = events[i - 1];
-    const nextEvent = events[i + 1];
+  // 辅助函数：找到最接近请求时间戳的事件索引
+  function findClosestEventIndex(requestTimestamp, eventType = null) {
+    let closestIndex = -1;
+    let minDiff = Infinity;
     
-    reportProgress('associating', i + 1, totalEvents, 
-      `正在关联事件 ${i + 1}/${totalEvents} (${eventType})...`);
-    
-    // 确定时间窗口
-    let windowStart, windowEnd;
-    
-    if (i === 0) {
-      // 第一个事件：从录制开始时间到下一个事件
-      // 这样可以捕获页面加载时的所有请求
-      windowStart = recordingStartTime;
-      windowEnd = nextEvent ? nextEvent.timestamp : eventTimestamp + 5000;
-    } else if (eventType === 'page-load') {
-      // page-load 事件：
-      // - 如果是第一个事件，从录制开始时间到下一个事件
-      // - 否则，从前一个事件到下一个事件
-      windowStart = prevEvent ? prevEvent.timestamp : recordingStartTime;
-      windowEnd = nextEvent ? nextEvent.timestamp : Infinity;
-    } else if (eventType === 'click') {
-      // click 事件：从前一个事件（或5秒前）到下一个事件（或 5 秒后）
-      // 这样可以捕获点击前的页面加载请求和点击后的响应
-      windowStart = prevEvent ? prevEvent.timestamp : Math.max(recordingStartTime, eventTimestamp - 5000);
-      windowEnd = nextEvent ? nextEvent.timestamp : eventTimestamp + 5000;
-    } else {
-      // 其他事件：从前一个事件（或2秒前）到下一个事件（或 2 秒后）
-      windowStart = prevEvent ? prevEvent.timestamp : Math.max(recordingStartTime, eventTimestamp - 2000);
-      windowEnd = nextEvent ? nextEvent.timestamp : eventTimestamp + 2000;
-    }
-
-    // 跳过没有 URL 的事件
-    if (!eventUrl) continue;
-
-    // 关联 API 请求（使用 timestamp + url 作为唯一标识）
-    const associatedApiRequests = apiRequests.filter((req) => {
-      const reqId = `${req.timestamp}_${req.url}`;
-      if (usedApiRequests.has(reqId)) return false;
-      if (req.timestamp < windowStart || req.timestamp >= windowEnd) return false;
+    for (let i = 0; i < events.length; i++) {
+      const event = events[i];
+      // 如果指定了事件类型，只考虑该类型的事件
+      if (eventType && event.event_details?.action !== eventType) continue;
       
-      // 对于 page-load 事件，关联所有请求（不限于同一站点）
-      // 对于其他事件，关联同一站点的请求
-      const match = eventType === 'page-load' ? true : isSameSite(req.url, eventUrl);
-      if (match) usedApiRequests.add(reqId);
-      return match;
-    });
+      const diff = Math.abs(event.timestamp - requestTimestamp);
+      if (diff < minDiff) {
+        minDiff = diff;
+        closestIndex = i;
+      }
+    }
+    
+    return closestIndex;
+  }
 
-    // 关联静态资源（使用 filename 作为唯一标识）
-    const associatedStaticResources = staticResources.filter((res) => {
-      if (usedStaticResources.has(res.filename)) return false;
-      if (res.timestamp < windowStart || res.timestamp >= windowEnd) return false;
-      usedStaticResources.add(res.filename);
-      return true;
-    });
+  // 辅助函数：找到请求应该关联的事件索引（考虑时间窗口和事件类型优先级）
+  function findBestEventForRequest(requestTimestamp, requestUrl) {
+    // 首先尝试找到时间窗口内的事件
+    for (let i = 0; i < events.length; i++) {
+      const event = events[i];
+      const eventTimestamp = event.timestamp;
+      const eventType = event.event_details?.action || '';
+      const eventUrl = event.window_context?.url || '';
+      const prevEvent = events[i - 1];
+      const nextEvent = events[i + 1];
+      
+      // 确定时间窗口
+      let windowStart, windowEnd;
+      
+      if (i === 0) {
+        windowStart = recordingStartTime;
+        windowEnd = nextEvent ? nextEvent.timestamp : eventTimestamp + 5000;
+      } else if (eventType === 'page-load') {
+        windowStart = prevEvent ? prevEvent.timestamp : recordingStartTime;
+        windowEnd = nextEvent ? nextEvent.timestamp : Infinity;
+      } else if (eventType === 'click') {
+        windowStart = prevEvent ? prevEvent.timestamp : Math.max(recordingStartTime, eventTimestamp - 5000);
+        windowEnd = nextEvent ? nextEvent.timestamp : eventTimestamp + 5000;
+      } else {
+        windowStart = prevEvent ? prevEvent.timestamp : Math.max(recordingStartTime, eventTimestamp - 2000);
+        windowEnd = nextEvent ? nextEvent.timestamp : eventTimestamp + 2000;
+      }
+      
+      // 检查请求是否在时间窗口内
+      if (requestTimestamp >= windowStart && requestTimestamp < windowEnd) {
+        // 对于非 page-load 事件，还需要检查是否同一站点
+        if (eventType !== 'page-load' && !isSameSite(requestUrl, eventUrl)) {
+          continue;
+        }
+        return i;
+      }
+    }
+    
+    // 如果时间窗口内没有合适的事件，找到时间戳最接近的事件
+    return findClosestEventIndex(requestTimestamp);
+  }
 
-    // 关联动态资源（使用 timestamp + url 作为唯一标识）
-    const associatedDynamicResources = dynamicResourcesList.filter((res) => {
-      const resId = `${res.timestamp || 0}_${res.url}`;
-      if (usedDynamicResources.has(resId)) return false;
-      const resTimestamp = res.timestamp || 0;
-      if (resTimestamp < windowStart || resTimestamp >= windowEnd) return false;
-      usedDynamicResources.add(resId);
-      return true;
-    });
+  // 初始化每个事件的关联数据
+  const eventAssociations = events.map(() => ({
+    apiRequests: [],
+    staticResources: [],
+    dynamicResources: []
+  }));
 
-    // 构建关联的 API 请求详情
-    const apiRequestsWithDetails = associatedApiRequests.map(req => {
+  // 第一步：关联 API 请求到最接近的事件
+  reportProgress('associating', 1, 3, '关联 API 请求...');
+  for (const req of apiRequests) {
+    const reqId = `${req.timestamp}_${req.url}`;
+    if (usedApiRequests.has(reqId)) continue;
+    
+    const eventIndex = findBestEventForRequest(req.timestamp, req.url);
+    if (eventIndex >= 0) {
+      const event = events[eventIndex];
       const response = apiResponses[req.url];
       const bodyInfo = apiBodies[req.timestamp];
       
-      return {
+      eventAssociations[eventIndex].apiRequests.push({
         url: req.url,
         method: req.method,
         status: req.status,
@@ -310,30 +317,59 @@ async function processCorrelation() {
             size: bodyInfo.content.length
           } : null
         } : null
-      };
-    });
+      });
+      usedApiRequests.add(reqId);
+    }
+  }
 
-    // 更新事件的 network_correlation
-    if (apiRequestsWithDetails.length > 0 || 
-        associatedStaticResources.length > 0 || 
-        associatedDynamicResources.length > 0) {
+  // 第二步：关联静态资源到最接近的事件
+  reportProgress('associating', 2, 3, '关联静态资源...');
+  for (const res of staticResources) {
+    if (usedStaticResources.has(res.filename)) continue;
+    
+    const eventIndex = findClosestEventIndex(res.timestamp);
+    if (eventIndex >= 0) {
+      eventAssociations[eventIndex].staticResources.push({
+        filename: res.filename,
+        path: res.path,
+        timestamp: res.timestamp,
+        size: res.size
+      });
+      usedStaticResources.add(res.filename);
+    }
+  }
+
+  // 第三步：关联动态资源到最接近的事件
+  reportProgress('associating', 3, 3, '关联动态资源...');
+  for (const res of dynamicResourcesList) {
+    const resId = `${res.timestamp || 0}_${res.url}`;
+    if (usedDynamicResources.has(resId)) continue;
+    
+    const eventIndex = findClosestEventIndex(res.timestamp || 0);
+    if (eventIndex >= 0) {
+      eventAssociations[eventIndex].dynamicResources.push({
+        url: res.url,
+        type: res.type,
+        status: res.status,
+        timestamp: res.timestamp,
+        path: res.path
+      });
+      usedDynamicResources.add(resId);
+    }
+  }
+
+  // 将关联数据应用到事件
+  for (let i = 0; i < events.length; i++) {
+    const assoc = eventAssociations[i];
+    if (assoc.apiRequests.length > 0 || 
+        assoc.staticResources.length > 0 || 
+        assoc.dynamicResources.length > 0) {
       
-      event.network_correlation = {
-        api_requests: apiRequestsWithDetails,
-        static_resources: associatedStaticResources.map(res => ({
-          filename: res.filename,
-          path: res.path,
-          timestamp: res.timestamp,
-          size: res.size
-        })),
-        dynamic_resources: associatedDynamicResources.map(res => ({
-          url: res.url,
-          type: res.type,
-          status: res.status,
-          timestamp: res.timestamp,
-          path: res.path
-        })),
-        response_status: apiRequestsWithDetails.length > 0 ? 'completed' : null
+      events[i].network_correlation = {
+        api_requests: assoc.apiRequests,
+        static_resources: assoc.staticResources,
+        dynamic_resources: assoc.dynamicResources,
+        response_status: assoc.apiRequests.length > 0 ? 'completed' : null
       };
       
       associatedCount++;
