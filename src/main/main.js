@@ -187,6 +187,28 @@ function clearDynamicResources() {
   log.info('Dynamic resources cleared');
 }
 
+// 查找与请求时间戳最接近的事件时间戳（提前定义避免Windows打包问题）
+function findEventTimestampForRequest(requestTimestamp) {
+  // 在 pendingEvents 中查找最接近的事件
+  for (const event of globalState.pendingEvents) {
+    const timeDiff = Math.abs(event.timestamp - requestTimestamp);
+    // 如果在 5 秒内，认为是同一个事件
+    if (timeDiff < 5000) {
+      return event.timestamp;
+    }
+  }
+  
+  // 在已刷新的事件中查找
+  for (const [timestamp, event] of globalState.flushedEvents) {
+    const timeDiff = Math.abs(timestamp - requestTimestamp);
+    if (timeDiff < 5000) {
+      return timestamp;
+    }
+  }
+  
+  return null;
+}
+
 // 存储路径配置 - Mac/Linux 使用默认路径，Windows 由用户选择
 let STORAGE_PATH = null;
 
@@ -1166,6 +1188,10 @@ function setupDownloadHandler(browserWindow) {
 // 磁盘空间监控
 function checkDiskSpace() {
   try {
+    // 如果 STORAGE_PATH 未设置，跳过检查
+    if (!STORAGE_PATH) {
+      return true;
+    }
     const stats = fs.statSync(STORAGE_PATH);
     const freeSpace = getFreeSpace(STORAGE_PATH);
     
@@ -1490,7 +1516,12 @@ async function stopRecording() {
 
       return new Promise((resolve, reject) => {
         const { spawn } = require('child_process');
-        const child = spawn('node', [scriptPath, globalState.currentTask.dir], {
+        
+        // 使用 process.execPath 作为 node 可执行文件（Electron 内置）
+        const nodePath = process.execPath;
+        log.info('Using Node.js from:', nodePath);
+        
+        const child = spawn(nodePath, [scriptPath, globalState.currentTask.dir], {
           stdio: ['inherit', 'pipe', 'pipe']
         });
 
@@ -1947,28 +1978,6 @@ function flushPendingEvents() {
   }
   
   globalState.pendingEvents = [];
-}
-
-// 查找与请求时间戳最接近的事件时间戳
-function findEventTimestampForRequest(requestTimestamp) {
-  // 在 pendingEvents 中查找最接近的事件
-  for (const event of globalState.pendingEvents) {
-    const timeDiff = Math.abs(event.timestamp - requestTimestamp);
-    // 如果在 5 秒内，认为是同一个事件
-    if (timeDiff < 5000) {
-      return event.timestamp;
-    }
-  }
-  
-  // 在已刷新的事件中查找
-  for (const [timestamp, event] of globalState.flushedEvents) {
-    const timeDiff = Math.abs(timestamp - requestTimestamp);
-    if (timeDiff < 5000) {
-      return timestamp;
-    }
-  }
-  
-  return null;
 }
 
 // 更新暂存事件，添加 API 请求

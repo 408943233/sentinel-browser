@@ -1,0 +1,25 @@
+{
+  "name": "sentinel-log-server",
+  "version": "1.0.0",
+  "description": "Sentinel Browser 日志接收服务",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "dev": "node server.js",
+    "pm2:start": "pm2 start server.js --name sentinel-log-server",
+    "pm2:stop": "pm2 stop sentinel-log-server",
+    "pm2:restart": "pm2 restart sentinel-log-server",
+    "pm2:logs": "pm2 logs sentinel-log-server"
+  },
+  "keywords": [
+    "sentinel",
+    "browser",
+    "log",
+    "server"
+  ],
+  "author": "Sentinel Team",
+  "license": "MIT",
+  "engines": {
+    "node": ">=14.0.0"
+  }
+}
