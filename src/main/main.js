@@ -2276,25 +2276,22 @@ function updateActivityTime() {
 ipcMain.handle('start-recording', async (event, config) => {
   log.info('start-recording called, platform:', process.platform, 'STORAGE_PATH:', STORAGE_PATH);
 
-  // Windows 平台：先让用户选择存储目录，再初始化管理器
-  if (process.platform === 'win32' && !STORAGE_PATH) {
-    log.info('Windows platform detected, showing directory selection dialog...');
-    const mainWindow = BrowserWindow.getFocusedWindow() || BrowserWindow.getAllWindows()[0];
-    log.info('Main window:', mainWindow ? 'found' : 'not found');
-    const selectedPath = await selectStorageDirectory(mainWindow);
-    log.info('Selected path:', selectedPath);
-    if (!selectedPath) {
-      throw new Error('未选择存储目录');
-    }
-    STORAGE_PATH = selectedPath;
-  }
-
   // 确保管理器已初始化
   if (!globalState.ffmpegManager) {
     log.warn('Managers not initialized yet, initializing now...');
     initializeManagers();
   }
   return startRecording(config);
+});
+
+// 选择存储目录（Windows）
+ipcMain.handle('select-storage-directory', async (event) => {
+  const mainWindow = BrowserWindow.getFocusedWindow() || BrowserWindow.getAllWindows()[0];
+  const selectedPath = await selectStorageDirectory(mainWindow);
+  if (selectedPath) {
+    STORAGE_PATH = selectedPath;
+  }
+  return selectedPath;
 });
 
 ipcMain.handle('stop-recording', async () => {

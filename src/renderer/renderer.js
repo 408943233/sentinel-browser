@@ -704,7 +704,23 @@ class SentinelRenderer {
   }
 
   // 任务管理
-  showTaskModal() {
+  async showTaskModal() {
+    // Windows 平台：先选择存储目录
+    if (window.sentinelAPI.selectStorageDirectory) {
+      try {
+        const storagePath = await window.sentinelAPI.selectStorageDirectory();
+        if (!storagePath) {
+          console.log('[Sentinel] No storage directory selected');
+          return;
+        }
+        console.log('[Sentinel] Storage directory selected:', storagePath);
+      } catch (error) {
+        console.error('[Sentinel] Failed to select storage directory:', error);
+        alert('选择存储目录失败: ' + error.message);
+        return;
+      }
+    }
+
     document.getElementById('task-modal').classList.add('active');
     document.getElementById('task-name').focus();
   }

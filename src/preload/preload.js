@@ -12,6 +12,9 @@ contextBridge.exposeInMainWorld('sentinelAPI', {
   getTasks: () => ipcRenderer.invoke('get-tasks'),
   exportTask: (taskId) => ipcRenderer.invoke('export-task', taskId),
 
+  // 存储目录选择（Windows）
+  selectStorageDirectory: () => ipcRenderer.invoke('select-storage-directory'),
+
   // 事件监听
   onRecordingStarted: (callback) => {
     ipcRenderer.on('recording-started', (event, data) => callback(data));
