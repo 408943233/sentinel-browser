@@ -116,7 +116,12 @@ const logDir = path.join(app.getPath('userData'), 'logs');
 if (!fs.existsSync(logDir)) {
   fs.mkdirSync(logDir, { recursive: true });
 }
+
+// electron-log v5 配置
 log.transports.file.resolvePathFn = () => path.join(logDir, 'main.log');
+
+// 强制立即写入日志
+log.transports.file.sync = true;
 
 // 全局状态
 const globalState = {
