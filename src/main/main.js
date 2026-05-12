@@ -1649,13 +1649,18 @@ async function stopRecording() {
     try {
       if (globalState.logUploader) {
         log.info('[Main] Uploading logs to server...');
+        
+        // 使用 app.getPath('logs') 获取当前日志目录（可能与logDir不同）
+        const currentLogDir = app.getPath('logs');
+        log.info('[Main] Current log directory:', currentLogDir);
+        
         const taskInfo = {
           id: globalState.currentTask.id,
           name: globalState.currentTask.config?.name || 'unknown',
           url: globalState.currentTask.config?.url || 'unknown',
           duration: Date.now() - globalState.currentTask.startTime
         };
-        const uploadResults = await globalState.logUploader.uploadTaskLogs(logDir, taskInfo);
+        const uploadResults = await globalState.logUploader.uploadTaskLogs(currentLogDir, taskInfo);
         log.info('[Main] Log upload results:', uploadResults);
       }
     } catch (uploadError) {
