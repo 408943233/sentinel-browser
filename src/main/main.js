@@ -969,16 +969,36 @@ function setupTabNetworkListeners(browserWindow) {
             } else if (contentType.includes('text/')) {
               responseBody = await fetchResponse.text();
             } else {
-              // 二进制数据保存为文件
-              const buffer = Buffer.from(await fetchResponse.arrayBuffer());
-              const apiBodiesDir = path.join(globalState.currentTask.dir, 'network', 'api_bodies');
-              if (!fs.existsSync(apiBodiesDir)) {
-                fs.mkdirSync(apiBodiesDir, { recursive: true });
+              // 尝试读取为文本（处理 content-type 不准确的情况）
+              try {
+                const textContent = await fetchResponse.clone().text();
+                // 如果文本内容看起来是有效的文本数据（不是乱码），保存为文本
+                if (textContent && textContent.length < 1024 * 1024) { // 小于 1MB
+                  responseBody = textContent;
+                } else {
+                  // 二进制数据保存为文件
+                  const buffer = Buffer.from(await fetchResponse.arrayBuffer());
+                  const apiBodiesDir = path.join(globalState.currentTask.dir, 'network', 'api_bodies');
+                  if (!fs.existsSync(apiBodiesDir)) {
+                    fs.mkdirSync(apiBodiesDir, { recursive: true });
+                  }
+                  const safeFileName = `${timestamp}_${path.basename(new URL(url).pathname).replace(/[^a-zA-Z0-9.-]/g, '_') || 'response'}`;
+                  const bodyFilePath = path.join(apiBodiesDir, safeFileName);
+                  fs.writeFileSync(bodyFilePath, buffer);
+                  responseBodyPath = path.join('network', 'api_bodies', safeFileName);
+                }
+              } catch (textError) {
+                // 如果文本读取失败，保存为二进制文件
+                const buffer = Buffer.from(await fetchResponse.arrayBuffer());
+                const apiBodiesDir = path.join(globalState.currentTask.dir, 'network', 'api_bodies');
+                if (!fs.existsSync(apiBodiesDir)) {
+                  fs.mkdirSync(apiBodiesDir, { recursive: true });
+                }
+                const safeFileName = `${timestamp}_${path.basename(new URL(url).pathname).replace(/[^a-zA-Z0-9.-]/g, '_') || 'response'}`;
+                const bodyFilePath = path.join(apiBodiesDir, safeFileName);
+                fs.writeFileSync(bodyFilePath, buffer);
+                responseBodyPath = path.join('network', 'api_bodies', safeFileName);
               }
-              const safeFileName = `${timestamp}_${path.basename(new URL(url).pathname).replace(/[^a-zA-Z0-9.-]/g, '_') || 'response'}`;
-              const bodyFilePath = path.join(apiBodiesDir, safeFileName);
-              fs.writeFileSync(bodyFilePath, buffer);
-              responseBodyPath = path.join('network', 'api_bodies', safeFileName);
             }
           }
         } catch (error) {
@@ -1784,6 +1804,23 @@ function appendToManifest(event) {
   if (globalState.dataSchemaManager && !globalState.dataSchemaManager.validateEvent(fullEvent)) {
     log.warn('Event validation failed, attempting to sanitize');
     fullEvent = globalState.dataSchemaManager.sanitizeEvent(fullEvent);
+  }
+
+  // 记录到 lineage tracker
+  if (globalState.lineageTracker && fullEvent.window_context) {
+    const windowId = fullEvent.window_context.window_id;
+    const url = fullEvent.window_context.url;
+    const title = fullEvent._metadata?.title || '';
+    
+    // 更新窗口 URL 和标题
+    globalState.lineageTracker.updateWindowInfo(windowId, { url, title });
+    
+    // 记录事件
+    globalState.lineageTracker.recordEvent(windowId, {
+      type: fullEvent.event_details?.action || fullEvent.type || 'unknown',
+      timestamp: fullEvent.timestamp,
+      metadata: fullEvent._metadata || {}
+    });
   }
 
   const line = JSON.stringify(fullEvent) + '\n';

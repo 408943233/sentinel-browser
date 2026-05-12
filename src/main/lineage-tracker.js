@@ -67,6 +67,17 @@ class LineageTracker {
   }
 
   /**
+   * 更新窗口信息（URL、标题等）
+   */
+  updateWindowInfo(windowId, info) {
+    const window = this.windows.get(windowId);
+    if (window) {
+      if (info.url !== undefined) window.url = info.url;
+      if (info.title !== undefined) window.title = info.title;
+    }
+  }
+
+  /**
    * 记录事件
    */
   recordEvent(windowId, eventData) {
