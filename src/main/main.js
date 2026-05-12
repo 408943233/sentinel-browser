@@ -226,8 +226,8 @@ function initializeManagers() {
 
   log.info('Initializing managers...');
 
-  // 确保 STORAGE_PATH 已设置
-  if (!STORAGE_PATH) {
+  // Windows 平台：等待用户选择存储目录，不自动设置默认路径
+  if (!STORAGE_PATH && process.platform !== 'win32') {
     log.warn('STORAGE_PATH not set, using default path');
     STORAGE_PATH = getDefaultStoragePath();
   }
