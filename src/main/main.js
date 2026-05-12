@@ -190,6 +190,11 @@ const dynamicResources = [];
 const requestBuffer = [];
 const REQUEST_BUFFER_WINDOW = 10000; // 10 秒的缓冲窗口
 
+// 请求 body 临时存储（用于在 onBeforeRequest 中捕获，在 onCompleted 中使用）
+const requestBodyMap = new Map();
+const REQUEST_BODY_MAX_SIZE = 1024 * 1024; // 1MB 大小限制
+const REQUEST_BODY_TTL = 30000; // 30 秒过期时间
+
 // 添加动态资源（用于懒加载等资源）
 function addDynamicResource(resource) {
   dynamicResources.push(resource);
@@ -1087,6 +1092,19 @@ function setupTabNetworkListeners(browserWindow) {
         const requestTimestamp = Date.now();
         const requestEndTime = Date.now();
         
+        // 查找对应的请求 body
+        let requestBody = null;
+        const requestBodyKey = `${url}_${requestTimestamp}`;
+        // 在 requestBodyMap 中查找最近 5 秒内匹配的请求 body
+        for (const [key, value] of requestBodyMap.entries()) {
+          if (key.startsWith(url) && Math.abs(value.timestamp - requestTimestamp) < 5000) {
+            requestBody = value.body;
+            // 找到后删除，避免重复关联
+            requestBodyMap.delete(key);
+            break;
+          }
+        }
+        
         // 创建 API 请求对象
         const apiRequest = {
           url: url,
@@ -1095,6 +1113,7 @@ function setupTabNetworkListeners(browserWindow) {
           timestamp: requestTimestamp,
           duration: requestEndTime - requestTimestamp,
           resourceType: resourceType,
+          requestBody: requestBody,  // 请求 body
           responseHeaders: responseHeaders,
           references: {
             apiResponsesKey: url,  // api_responses.json 中的 key
@@ -1106,13 +1125,66 @@ function setupTabNetworkListeners(browserWindow) {
         // 将请求加入缓冲队列，等待后续统一关联
         // 实际关联由 post-process-correlation.js 脚本在录制结束后完成
         requestBuffer.push(apiRequest);
-        log.debug('WebRequest buffered:', url, 'timestamp:', requestTimestamp);
+        log.debug('WebRequest buffered:', url, 'timestamp:', requestTimestamp, 'hasBody:', !!requestBody);
       }
     }
   });
 
-  // 拦截文件请求（PDF、图片、文档等）
+  // 拦截 XHR/fetch 请求以捕获请求 body
   session.webRequest.onBeforeRequest((details, callback) => {
+    // 只有在录制中且未暂停时才记录
+    if (globalState.isRecording && globalState.currentTask && !globalState.isPaused) {
+      if (details.resourceType === 'xhr' || details.resourceType === 'fetch') {
+        // 捕获请求 body
+        if (details.uploadData && details.uploadData.length > 0) {
+          try {
+            // 合并所有数据块
+            const chunks = details.uploadData.map(data => data.bytes).filter(Boolean);
+            const totalSize = chunks.reduce((sum, chunk) => sum + chunk.length, 0);
+            
+            // 检查大小限制
+            if (totalSize > 0 && totalSize <= REQUEST_BODY_MAX_SIZE) {
+              const bodyBuffer = Buffer.concat(chunks);
+              const bodyString = bodyBuffer.toString('utf-8');
+              
+              // 尝试解析为 JSON
+              let parsedBody = null;
+              try {
+                parsedBody = JSON.parse(bodyString);
+              } catch {
+                // 不是 JSON，保存为字符串
+                parsedBody = bodyString;
+              }
+              
+              // 存储到临时 map，使用 URL + timestamp 作为 key
+              const key = `${details.url}_${Date.now()}`;
+              requestBodyMap.set(key, {
+                body: parsedBody,
+                rawBody: bodyString,
+                size: totalSize,
+                timestamp: Date.now()
+              });
+              
+              // 清理过期的请求 body
+              const cutoff = Date.now() - REQUEST_BODY_TTL;
+              for (const [k, v] of requestBodyMap.entries()) {
+                if (v.timestamp < cutoff) {
+                  requestBodyMap.delete(k);
+                }
+              }
+              
+              log.debug('Request body captured:', details.url, 'size:', totalSize);
+            } else if (totalSize > REQUEST_BODY_MAX_SIZE) {
+              log.warn('Request body too large, skipped:', details.url, 'size:', totalSize);
+            }
+          } catch (err) {
+            log.error('Failed to capture request body:', err);
+          }
+        }
+      }
+    }
+    
+    // 拦截文件请求（PDF、图片、文档等）
     if (details.resourceType === 'mainFrame' || details.resourceType === 'subFrame') {
       const url = details.url.toLowerCase();
       
@@ -2079,13 +2151,14 @@ function updatePendingEventWithApiRequest(eventTimestamp, apiRequest) {
     }
     pendingEvent.apiRequests.push(apiRequest);
     
-    // 保存关联关系到日志文件
+    // 保存关联关系到日志文件（包含请求 body）
     saveCorrelationLog(eventTimestamp, {
       requestTimestamp: apiRequest.timestamp,
       url: apiRequest.url,
       method: apiRequest.method,
       status: apiRequest.status,
-      resourceType: apiRequest.resourceType
+      resourceType: apiRequest.resourceType,
+      requestBody: apiRequest.requestBody  // 包含请求 body
     }, 'api_request');
     return;
   }
@@ -2099,13 +2172,14 @@ function updatePendingEventWithApiRequest(eventTimestamp, apiRequest) {
     flushedEvent.apiRequests.push(apiRequest);
     globalState.flushedEvents.set(eventTimestamp, flushedEvent);
     
-    // 保存关联关系到日志文件
+    // 保存关联关系到日志文件（包含请求 body）
     saveCorrelationLog(eventTimestamp, {
       requestTimestamp: apiRequest.timestamp,
       url: apiRequest.url,
       method: apiRequest.method,
       status: apiRequest.status,
-      resourceType: apiRequest.resourceType
+      resourceType: apiRequest.resourceType,
+      requestBody: apiRequest.requestBody  // 包含请求 body
     }, 'api_request');
   }
 }
