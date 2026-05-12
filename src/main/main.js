@@ -192,7 +192,7 @@ const REQUEST_BUFFER_WINDOW = 10000; // 10 秒的缓冲窗口
 
 // 请求 body 临时存储（用于在 onBeforeRequest 中捕获，在 onCompleted 中使用）
 const requestBodyMap = new Map();
-const REQUEST_BODY_MAX_SIZE = 1024 * 1024; // 1MB 大小限制
+const REQUEST_BODY_MAX_SIZE = 10 * 1024 * 1024; // 10MB 大小限制
 const REQUEST_BODY_TTL = 30000; // 30 秒过期时间
 
 // 添加动态资源（用于懒加载等资源）
@@ -1611,6 +1611,17 @@ async function stopRecording() {
           const state = await globalState.stateManager.captureState(firstWindow.window.webContents);
           if (state) {
             globalState.stateManager.saveStateToTask(globalState.currentTask.dir, state);
+            
+            // 保存浏览器状态关联到 correlation log（关联到 task_stop 事件）
+            const stopEventTimestamp = Date.now();
+            saveCorrelationLog(stopEventTimestamp, {
+              url: state.url,
+              title: state.title,
+              localStorageKeys: Object.keys(state.localStorage || {}),
+              sessionStorageKeys: Object.keys(state.sessionStorage || {}),
+              cookieCount: (state.cookies || []).length,
+              indexedDBDatabases: Object.keys(state.indexedDB || {})
+            }, 'browser_state');
           }
         }
       } catch (error) {
@@ -2033,6 +2044,14 @@ function appendToManifest(event) {
       timestamp: fullEvent.timestamp,
       metadata: fullEvent._metadata || {}
     });
+    
+    // 保存谱系关联到 correlation log
+    saveCorrelationLog(fullEvent.timestamp, {
+      windowId: windowId,
+      url: url,
+      title: title,
+      action: fullEvent.event_details?.action || fullEvent.type || 'unknown'
+    }, 'lineage');
   }
 
   const line = JSON.stringify(fullEvent) + '\n';
@@ -3736,6 +3755,16 @@ ipcMain.on('report-error', (event, errorData) => {
       );
 
       appendToManifest(errorEvent);
+      
+      // 保存错误关联到 correlation log
+      saveCorrelationLog(errorEvent.timestamp, {
+        errorType: errorData.type || 'unknown',
+        message: errorData.message,
+        filename: errorData.filename,
+        lineno: errorData.lineno,
+        stack: errorData.stack,
+        windowId: `win_${event.sender.id}`
+      }, 'error');
     }
 });
 
