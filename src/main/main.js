@@ -85,7 +85,17 @@ if (!fs.existsSync(userDataPath)) {
 }
 app.setPath('userData', userDataPath);
 app.setPath('cache', path.join(userDataPath, 'Cache'));
-app.setPath('logs', path.join(userDataPath, 'logs'));
+
+// 日志目录：Windows使用安装目录，其他平台使用userData
+let logsPath;
+if (process.platform === 'win32' && app.isPackaged) {
+  // Windows打包版本：使用安装目录下的logs
+  logsPath = path.join(path.dirname(app.getPath('exe')), 'logs');
+} else {
+  // 其他情况：使用userData下的logs
+  logsPath = path.join(userDataPath, 'logs');
+}
+app.setPath('logs', logsPath);
 
 // 简单的UUID生成函数（不依赖外部模块）
 function generateUUID() {
@@ -112,8 +122,8 @@ log.initialize();
 log.transports.file.level = 'debug';
 log.transports.console.level = 'debug';
 
-// 设置日志文件路径（Windows 兼容）
-const logDir = path.join(app.getPath('userData'), 'logs');
+// 设置日志文件路径（使用 app.getPath('logs') 确保一致性）
+const logDir = app.getPath('logs');
 const logFilePath = path.join(logDir, 'main.log');
 
 // 确保日志目录存在
@@ -132,9 +142,12 @@ log.transports.file.resolvePathFn = () => logFilePath;
 // 强制立即写入日志
 log.transports.file.sync = true;
 
-// 记录日志配置信息
+// 记录日志配置信息（使用 log.info 确保写入文件）
 console.log('[Main] Log directory:', logDir);
 console.log('[Main] Log file:', logFilePath);
+log.info('[Main] Logging initialized');
+log.info('[Main] Log directory:', logDir);
+log.info('[Main] Log file:', logFilePath);
 log.info('[Main] Logging initialized');
 log.info('[Main] Log directory:', logDir);
 log.info('[Main] Log file:', logFilePath);
