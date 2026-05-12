@@ -22,6 +22,9 @@ class SentinelRenderer {
     // Preload 路径缓存
     this.preloadPath = null;
 
+    // 存储目录缓存（Windows）
+    this.storagePath = null;
+
     this.init();
     this.loadPreloadPath();
   }
@@ -705,14 +708,15 @@ class SentinelRenderer {
 
   // 任务管理
   async showTaskModal() {
-    // Windows 平台：先选择存储目录
-    if (window.sentinelAPI.selectStorageDirectory) {
+    // Windows 平台：先选择存储目录（只选择一次，后续延用）
+    if (window.sentinelAPI.selectStorageDirectory && !this.storagePath) {
       try {
         const storagePath = await window.sentinelAPI.selectStorageDirectory();
         if (!storagePath) {
           console.log('[Sentinel] No storage directory selected');
           return;
         }
+        this.storagePath = storagePath;
         console.log('[Sentinel] Storage directory selected:', storagePath);
       } catch (error) {
         console.error('[Sentinel] Failed to select storage directory:', error);
