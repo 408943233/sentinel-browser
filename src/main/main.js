@@ -1382,6 +1382,10 @@ async function startRecording(taskConfig = {}) {
   const apiLogPath = path.join(taskDir, 'network', 'api_traffic.jsonl');
   globalState.apiLogStream = fs.createWriteStream(apiLogPath, { flags: 'a' });
 
+  // 打开实时关联日志（用于保存 WebRequest 与事件的关联关系）
+  const correlationLogPath = path.join(taskDir, 'network', 'request_correlation.jsonl');
+  globalState.correlationLogStream = fs.createWriteStream(correlationLogPath, { flags: 'a' });
+
   // 打开控制台错误日志
   const consoleErrorPath = path.join(taskDir, 'logs', 'console_errors.jsonl');
   globalState.consoleErrorStream = fs.createWriteStream(consoleErrorPath, { flags: 'a' });
@@ -1478,6 +1482,12 @@ async function stopRecording() {
   if (globalState.apiLogStream) {
     globalState.apiLogStream.end();
     globalState.apiLogStream = null;
+  }
+
+  // 关闭关联日志流
+  if (globalState.correlationLogStream) {
+    globalState.correlationLogStream.end();
+    globalState.correlationLogStream = null;
   }
 
   // 关闭 console_errors.jsonl 流
@@ -2068,6 +2078,15 @@ function updatePendingEventWithApiRequest(eventTimestamp, apiRequest) {
       pendingEvent.apiRequests = [];
     }
     pendingEvent.apiRequests.push(apiRequest);
+    
+    // 保存关联关系到日志文件
+    saveCorrelationLog(eventTimestamp, {
+      requestTimestamp: apiRequest.timestamp,
+      url: apiRequest.url,
+      method: apiRequest.method,
+      status: apiRequest.status,
+      resourceType: apiRequest.resourceType
+    }, 'api_request');
     return;
   }
   
@@ -2079,7 +2098,30 @@ function updatePendingEventWithApiRequest(eventTimestamp, apiRequest) {
     }
     flushedEvent.apiRequests.push(apiRequest);
     globalState.flushedEvents.set(eventTimestamp, flushedEvent);
+    
+    // 保存关联关系到日志文件
+    saveCorrelationLog(eventTimestamp, {
+      requestTimestamp: apiRequest.timestamp,
+      url: apiRequest.url,
+      method: apiRequest.method,
+      status: apiRequest.status,
+      resourceType: apiRequest.resourceType
+    }, 'api_request');
   }
+}
+
+// 保存关联关系到日志文件
+function saveCorrelationLog(eventTimestamp, data, type = 'api_request') {
+  if (!globalState.correlationLogStream) return;
+  
+  const correlationRecord = {
+    timestamp: Date.now(),
+    type: type, // 'api_request', 'api_response', 'static_resource', 'dynamic_resource', 'lineage', 'browser_state'
+    eventTimestamp: eventTimestamp,
+    data: data
+  };
+  
+  globalState.correlationLogStream.write(JSON.stringify(correlationRecord) + '\n');
 }
 
 // 缓冲 API 请求，等待后续关联

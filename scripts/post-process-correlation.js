@@ -31,6 +31,7 @@ const apiResponsesPath = path.join(taskDir, 'network', 'api_responses.json');
 const dynamicResourcesPath = path.join(taskDir, 'network', 'dynamic_resources.json');
 const resourcesDir = path.join(taskDir, 'network', 'resources');
 const apiBodiesDir = path.join(taskDir, 'network', 'api_bodies');
+const correlationLogPath = path.join(taskDir, 'network', 'request_correlation.jsonl'); // 实时关联日志
 
 // 检查文件是否存在
 if (!fs.existsSync(manifestPath)) {
@@ -212,7 +213,7 @@ async function processCorrelation() {
   console.log(`Time difference: ${firstEventTimestamp - earliestTimestamp}ms`);
 
   // 为每个事件关联网络数据
-  // 基于因果关系：事件触发网络请求，请求可能跨事件延续
+  // 优先使用实时关联日志，如果没有则使用基于因果关系的推断
   let associatedCount = 0;
   const usedApiRequests = new Set();
   const usedStaticResources = new Set();
@@ -226,6 +227,17 @@ async function processCorrelation() {
     staticResources: [],
     dynamicResources: []
   }));
+
+  // 读取实时关联日志（如果存在）
+  const correlationLog = readJsonl(correlationLogPath);
+  const correlationMap = new Map(); // requestTimestamp_url -> eventTimestamp
+  
+  for (const record of correlationLog) {
+    const key = `${record.requestTimestamp}_${record.url}`;
+    correlationMap.set(key, record.eventTimestamp);
+  }
+  
+  console.log(`Loaded ${correlationLog.length} correlations from log`);
 
   // 辅助函数：确定事件的影响时间窗口（请求可能被该事件触发的时间范围）
   function getEventInfluenceWindow(eventIndex) {
@@ -264,58 +276,75 @@ async function processCorrelation() {
   const eventInfluenceWindows = events.map((_, index) => getEventInfluenceWindow(index));
 
   // 第二步：关联 API 请求
-  // 对于每个请求，找到可能触发它的所有事件，然后选择最可能的一个
+  // 优先使用实时关联日志，如果没有则使用基于时间窗口的推断
   reportProgress('associating', 1, 3, '关联 API 请求...');
   
   for (const req of apiRequests) {
     const reqId = `${req.timestamp}_${req.url}`;
     if (usedApiRequests.has(reqId)) continue;
     
-    // 找到所有可能影响该请求的事件（请求时间在事件影响窗口内）
-    const candidateEvents = [];
+    let eventIndex = -1;
     
-    for (let i = 0; i < events.length; i++) {
-      const window = eventInfluenceWindows[i];
-      const event = events[i];
-      const eventUrl = event.window_context?.url || '';
-      
-      // 检查请求是否在事件的影响窗口内
-      if (req.timestamp >= window.start && req.timestamp < window.end) {
-        // 对于非 page-load 事件，检查是否同一站点
-        if (window.type !== 'page-load' && !isSameSite(req.url, eventUrl)) {
-          continue;
-        }
-        
-        // 计算优先级：click 和 page-load 优先级较高
-        let priority = 0;
-        if (window.type === 'click') priority = 3;
-        else if (window.type === 'page-load') priority = 2;
-        else if (window.type === 'scroll-start' || window.type === 'scroll-end') priority = 1;
-        else priority = 0;
-        
-        // 计算时间差（越小越好）
-        const timeDiff = req.timestamp - window.start;
-        
-        candidateEvents.push({
-          index: i,
-          priority: priority,
-          timeDiff: timeDiff,
-          window: window
-        });
+    // 首先尝试从关联日志中查找
+    const correlatedEventTimestamp = correlationMap.get(reqId);
+    if (correlatedEventTimestamp) {
+      // 找到对应的事件索引
+      eventIndex = events.findIndex(e => e.timestamp === correlatedEventTimestamp);
+      if (eventIndex >= 0) {
+        console.log(`Using correlation log: ${req.url} -> event ${eventIndex}`);
       }
     }
     
-    if (candidateEvents.length > 0) {
-      // 选择最佳事件：优先级高 -> 时间差小
-      candidateEvents.sort((a, b) => {
-        if (b.priority !== a.priority) {
-          return b.priority - a.priority; // 优先级高的在前
-        }
-        return a.timeDiff - b.timeDiff; // 时间差小的在前
-      });
+    // 如果没有找到关联，使用基于时间窗口的推断
+    if (eventIndex < 0) {
+      // 找到所有可能影响该请求的事件（请求时间在事件影响窗口内）
+      const candidateEvents = [];
       
-      const bestEvent = candidateEvents[0];
-      const eventIndex = bestEvent.index;
+      for (let i = 0; i < events.length; i++) {
+        const window = eventInfluenceWindows[i];
+        const event = events[i];
+        const eventUrl = event.window_context?.url || '';
+        
+        // 检查请求是否在事件的影响窗口内
+        if (req.timestamp >= window.start && req.timestamp < window.end) {
+          // 对于非 page-load 事件，检查是否同一站点
+          if (window.type !== 'page-load' && !isSameSite(req.url, eventUrl)) {
+            continue;
+          }
+          
+          // 计算优先级：click 和 page-load 优先级较高
+          let priority = 0;
+          if (window.type === 'click') priority = 3;
+          else if (window.type === 'page-load') priority = 2;
+          else if (window.type === 'scroll-start' || window.type === 'scroll-end') priority = 1;
+          else priority = 0;
+          
+          // 计算时间差（越小越好）
+          const timeDiff = req.timestamp - window.start;
+          
+          candidateEvents.push({
+            index: i,
+            priority: priority,
+            timeDiff: timeDiff,
+            window: window
+          });
+        }
+      }
+      
+      if (candidateEvents.length > 0) {
+        // 选择最佳事件：优先级高 -> 时间差小
+        candidateEvents.sort((a, b) => {
+          if (b.priority !== a.priority) {
+            return b.priority - a.priority; // 优先级高的在前
+          }
+          return a.timeDiff - b.timeDiff; // 时间差小的在前
+        });
+        
+        eventIndex = candidateEvents[0].index;
+      }
+    }
+    
+    if (eventIndex >= 0) {
       const event = events[eventIndex];
       const response = apiResponses[req.url];
       const bodyInfo = apiBodies[req.timestamp];
