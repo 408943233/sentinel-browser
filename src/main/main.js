@@ -723,8 +723,9 @@ function createMainWindow() {
       case 'sentinel-page-loaded':
         log.info('[Main] Webview page loaded received:', data.url, 'timestamp:', data.timestamp);
         {
-          // 使用后端生成的时间戳，确保与网络请求时间戳一致
-          const timestamp = Date.now();
+          // 使用 webview 传来的原始时间戳（DOMContentLoaded 触发时间），而不是生成新的时间戳
+          // 这样才能准确反映页面开始加载的时间
+          const timestamp = data.timestamp || Date.now();
           log.info('[Main] Recording page-load event, timestamp:', timestamp, 'startTime:', globalState.currentTask?.startTime);
           // 只有第一次页面加载使用 snapshot_initial.json，后续使用 timestamp 文件名
           const isInitial = !globalState.initialSnapshotSaved;
@@ -918,8 +919,8 @@ function setupWebviewIPCListeners(browserWindow) {
       case 'sentinel-page-loaded':
         log.info('Tab page loaded:', data.url);
         {
-          // 使用后端生成的时间戳，确保与网络请求时间戳一致
-          const timestamp = Date.now();
+          // 使用 webview 传来的原始时间戳（DOMContentLoaded 触发时间），而不是生成新的时间戳
+          const timestamp = data.timestamp || Date.now();
           const isInitial = !globalState.initialSnapshotSaved;
           
           recordUserAction({
@@ -1361,6 +1362,12 @@ async function startRecording(taskConfig = {}) {
   // 打开 training_manifest.jsonl（黄金文件，取代原 user_actions）
   const manifestPath = path.join(taskDir, 'training_manifest.jsonl');
   globalState.manifestStream = fs.createWriteStream(manifestPath, { flags: 'a' });
+  
+  // Windows: 等待流准备好再写入
+  if (process.platform === 'win32') {
+    // 使用同步写入确保文件立即创建
+    fs.writeFileSync(manifestPath, '');
+  }
 
   // 打开API流量日志
   const apiLogPath = path.join(taskDir, 'network', 'api_traffic.jsonl');
@@ -1938,11 +1945,20 @@ function appendToManifest(event) {
   }
 
   const line = JSON.stringify(fullEvent) + '\n';
-  globalState.manifestStream.write(line);
   
-  // Windows: 强制刷新确保立即写入
+  // Windows: 使用同步写入确保事件立即保存
   if (process.platform === 'win32') {
-    globalState.manifestStream.uncork();
+    try {
+      const manifestPath = path.join(globalState.currentTask.dir, 'training_manifest.jsonl');
+      fs.appendFileSync(manifestPath, line);
+      log.info('[appendToManifest] Event written to disk (Windows sync):', event.type || event.event_details?.action);
+    } catch (err) {
+      log.error('[appendToManifest] Failed to write event (Windows):', err);
+      // 回退到流写入
+      globalState.manifestStream.write(line);
+    }
+  } else {
+    globalState.manifestStream.write(line);
   }
 }
 
