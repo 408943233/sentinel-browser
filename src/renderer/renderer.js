@@ -949,7 +949,16 @@ class SentinelRenderer {
       // 查找当前应用的窗口（通过名称匹配 Sentinel Browser）
       let source = sources.find(s => s.name.includes('Sentinel Browser'));
 
-      // 如果没找到，使用第一个窗口
+      // 如果没找到 Sentinel Browser，尝试找 webview 或相关窗口
+      if (!source) {
+        source = sources.find(s => 
+          s.name.includes('webview') || 
+          s.name.includes('Browser') ||
+          s.name.includes('Chrome')
+        );
+      }
+
+      // 如果还是没找到，使用第一个窗口
       if (!source) {
         source = sources[0];
       }

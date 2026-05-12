@@ -3606,8 +3606,10 @@ ipcMain.handle('get-screen-sources', async () => {
 ipcMain.handle('get-window-sources', async () => {
   try {
     const { desktopCapturer } = require('electron');
+    // Windows 上同时获取 screen 和 window 类型
+    const types = process.platform === 'win32' ? ['screen', 'window'] : ['window'];
     const sources = await desktopCapturer.getSources({
-      types: ['window'],
+      types: types,
       thumbnailSize: { width: 1920, height: 1080 },
       fetchWindowIcons: true
     });
