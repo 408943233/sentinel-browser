@@ -987,9 +987,11 @@ ipcRenderer.on('trigger-dom-snapshot', (event, data) => {
   saveDOMSnapshot(type, timestamp);
 });
 
-// 页面加载完成通知
-window.addEventListener('load', () => {
+// 页面加载开始通知（使用 DOMContentLoaded 而不是 load，更早触发）
+window.addEventListener('DOMContentLoaded', () => {
   const timestamp = Date.now();
+  
+  console.log('[Sentinel Webview] DOMContentLoaded fired, sending page-load event');
   
   ipcRenderer.sendToHost('sentinel-page-loaded', {
     type: 'page-load',

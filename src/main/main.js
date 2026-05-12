@@ -1869,8 +1869,11 @@ async function extractSnapshotsFromVideo(taskDir, videoPath) {
 // 追加到manifest（原子写入）
 function appendToManifest(event) {
   if (!globalState.isRecording || !globalState.manifestStream) {
+    log.warn('[appendToManifest] Cannot append: isRecording=' + globalState.isRecording + ', manifestStream=' + !!globalState.manifestStream);
     return;
   }
+
+  log.info('[appendToManifest] Appending event:', event.type || event.event_details?.action, 'timestamp:', event.timestamp);
 
   // 先写入之前暂存的事件
   flushPendingEvents();
@@ -1880,6 +1883,7 @@ function appendToManifest(event) {
   let fullEvent = event;
 
   if (!event.window_context || !event.user_context) {
+    log.info('[appendToManifest] Event missing window_context or user_context, regenerating...');
     // 使用DataSchemaManager生成完整事件
     if (globalState.dataSchemaManager) {
       fullEvent = globalState.dataSchemaManager.generateEvent(event.type || 'unknown', {
@@ -1902,13 +1906,18 @@ function appendToManifest(event) {
           scrollY: event.scrollY
         }
       });
+      log.info('[appendToManifest] Event regenerated, action:', fullEvent.event_details?.action);
     }
+  } else {
+    log.info('[appendToManifest] Event already has full schema');
   }
 
   // 验证数据完整性
   if (globalState.dataSchemaManager && !globalState.dataSchemaManager.validateEvent(fullEvent)) {
-    log.warn('Event validation failed, attempting to sanitize');
+    log.warn('[appendToManifest] Event validation failed, attempting to sanitize');
     fullEvent = globalState.dataSchemaManager.sanitizeEvent(fullEvent);
+  } else {
+    log.info('[appendToManifest] Event validation passed');
   }
 
   // 记录到 lineage tracker
