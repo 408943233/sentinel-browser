@@ -2487,56 +2487,57 @@ ipcMain.handle('export-task', async (event, taskId) => {
     // 发送进度
     sender.send('export-progress', { percent: 30, message: '正在压缩文件...' });
 
-    // 使用系统 zip 命令
+    // 使用 archiver 库进行跨平台压缩
     return new Promise((resolve, reject) => {
-      const { exec } = require('child_process');
+      const archiver = require('archiver');
       const taskBaseName = path.basename(taskDir);
 
-      // 先检查 zip 命令是否可用
-      exec('which zip', (checkError) => {
-        if (checkError) {
-          log.error('zip command not found in system');
-          reject(new Error('zip command not found. Please install zip utility.'));
-          return;
+      log.info('Using archiver for cross-platform zip creation');
+
+      // 创建输出流
+      const output = fs.createWriteStream(zipPath);
+      const archive = archiver('zip', {
+        zlib: { level: 9 } // 最大压缩级别
+      });
+
+      // 监听事件
+      output.on('close', () => {
+        const stats = fs.statSync(zipPath);
+        log.info(`Export completed: ${zipPath} (${stats.size} bytes)`);
+        sender.send('export-progress', { percent: 100, message: '导出完成' });
+        resolve(zipPath);
+      });
+
+      archive.on('error', (err) => {
+        log.error('Archiver error:', err);
+        reject(new Error(`Zip failed: ${err.message}`));
+      });
+
+      archive.on('warning', (err) => {
+        if (err.code === 'ENOENT') {
+          log.warn('Archiver warning:', err);
+        } else {
+          log.error('Archiver warning:', err);
         }
+      });
 
-        // 使用 -9 最大压缩，-q 静默模式，处理特殊字符
-        const cmd = `cd "${STORAGE_PATH}" && zip -r -9 -q "${zipPath}" "${taskBaseName}"`;
-        log.info('Executing zip command:', cmd);
-
-        sender.send('export-progress', { percent: 50, message: '正在打包...' });
-
-        exec(cmd, { timeout: 120000, maxBuffer: 1024 * 1024 * 10 }, (error, stdout, stderr) => {
-          if (error) {
-            log.error('Zip command failed:', error);
-            log.error('Stderr:', stderr);
-            // 即使有警告也检查 zip 文件是否生成
-            if (fs.existsSync(zipPath)) {
-              const stats = fs.statSync(zipPath);
-              if (stats.size > 0) {
-                log.info(`Export completed with warnings: ${zipPath} (${stats.size} bytes)`);
-                sender.send('export-progress', { percent: 100, message: '导出完成' });
-                resolve(zipPath);
-                return;
-              }
-            }
-            reject(new Error(`Zip failed: ${error.message}`));
-            return;
-          }
-
-          // 检查 zip 文件是否生成
-          if (!fs.existsSync(zipPath)) {
-            log.error('Zip file was not created');
-            reject(new Error('Zip file was not created'));
-            return;
-          }
-
-          const stats = fs.statSync(zipPath);
-          log.info(`Export completed: ${zipPath} (${stats.size} bytes)`);
-          sender.send('export-progress', { percent: 100, message: '导出完成' });
-          resolve(zipPath);
+      archive.on('progress', (progress) => {
+        const percent = 30 + Math.floor((progress.entries.processed / progress.entries.total) * 60);
+        sender.send('export-progress', { 
+          percent: Math.min(percent, 90), 
+          message: `正在打包... (${progress.entries.processed}/${progress.entries.total})` 
         });
       });
+
+      // 连接管道
+      archive.pipe(output);
+
+      // 添加目录到压缩包
+      sender.send('export-progress', { percent: 50, message: '正在打包...' });
+      archive.directory(taskDir, taskBaseName);
+
+      // 完成压缩
+      archive.finalize();
     });
   } catch (error) {
     log.error('Export task error:', error);
