@@ -112,17 +112,32 @@ log.initialize();
 log.transports.file.level = 'debug';
 log.transports.console.level = 'debug';
 
-// 设置日志文件路径
+// 设置日志文件路径（Windows 兼容）
 const logDir = path.join(app.getPath('userData'), 'logs');
-if (!fs.existsSync(logDir)) {
-  fs.mkdirSync(logDir, { recursive: true });
+const logFilePath = path.join(logDir, 'main.log');
+
+// 确保日志目录存在
+try {
+  if (!fs.existsSync(logDir)) {
+    fs.mkdirSync(logDir, { recursive: true });
+    console.log('[Main] Created log directory:', logDir);
+  }
+} catch (err) {
+  console.error('[Main] Failed to create log directory:', err);
 }
 
-// electron-log v5 配置
-log.transports.file.resolvePathFn = () => path.join(logDir, 'main.log');
+// electron-log v5 配置 - 使用绝对路径
+log.transports.file.resolvePathFn = () => logFilePath;
 
 // 强制立即写入日志
 log.transports.file.sync = true;
+
+// 记录日志配置信息
+console.log('[Main] Log directory:', logDir);
+console.log('[Main] Log file:', logFilePath);
+log.info('[Main] Logging initialized');
+log.info('[Main] Log directory:', logDir);
+log.info('[Main] Log file:', logFilePath);
 
 // 全局状态
 const globalState = {

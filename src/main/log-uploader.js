@@ -121,12 +121,23 @@ class LogUploader {
   async uploadAllLogs(logDir, metadata = {}) {
     const results = [];
 
+    log.info(`[LogUploader] Looking for logs in: ${logDir}`);
+
     if (!fs.existsSync(logDir)) {
       log.warn(`[LogUploader] Log directory not found: ${logDir}`);
       return results;
     }
 
+    // 列出目录内容（调试用）
+    try {
+      const allFiles = fs.readdirSync(logDir);
+      log.info(`[LogUploader] Directory contents:`, allFiles);
+    } catch (e) {
+      log.error(`[LogUploader] Failed to read directory:`, e.message);
+    }
+
     const logFiles = fs.readdirSync(logDir).filter(file => file.endsWith('.log'));
+    log.info(`[LogUploader] Found ${logFiles.length} log files:`, logFiles);
 
     for (const logFile of logFiles) {
       const logPath = path.join(logDir, logFile);
