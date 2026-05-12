@@ -715,6 +715,13 @@ class SentinelRenderer {
   }
 
   async startTask() {
+    // 防止重复点击
+    if (this.isStartingTask) {
+      console.log('[Sentinel] Task is already starting, ignoring duplicate click');
+      return;
+    }
+    this.isStartingTask = true;
+
     const name = document.getElementById('task-name').value.trim();
     const operator = document.getElementById('task-operator').value.trim();
     let url = document.getElementById('task-url').value.trim();
@@ -722,6 +729,7 @@ class SentinelRenderer {
 
     if (!name || !operator || !url) {
       alert('请填写任务名称、操作人姓名和起始URL');
+      this.isStartingTask = false;
       return;
     }
 
@@ -787,6 +795,8 @@ class SentinelRenderer {
     } catch (error) {
       console.error('[Sentinel] Failed to start task:', error);
       alert('启动任务失败: ' + error.message);
+    } finally {
+      this.isStartingTask = false;
     }
   }
 
