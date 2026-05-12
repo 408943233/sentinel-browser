@@ -212,75 +212,13 @@ async function processCorrelation() {
   console.log(`Time difference: ${firstEventTimestamp - earliestTimestamp}ms`);
 
   // 为每个事件关联网络数据
-  // 新逻辑：将每个网络请求关联到时间戳最接近的事件
+  // 基于因果关系：事件触发网络请求，请求可能跨事件延续
   let associatedCount = 0;
   const usedApiRequests = new Set();
   const usedStaticResources = new Set();
   const usedDynamicResources = new Set();
   
   const totalEvents = events.length;
-
-  // 辅助函数：找到最接近请求时间戳的事件索引
-  function findClosestEventIndex(requestTimestamp, eventType = null) {
-    let closestIndex = -1;
-    let minDiff = Infinity;
-    
-    for (let i = 0; i < events.length; i++) {
-      const event = events[i];
-      // 如果指定了事件类型，只考虑该类型的事件
-      if (eventType && event.event_details?.action !== eventType) continue;
-      
-      const diff = Math.abs(event.timestamp - requestTimestamp);
-      if (diff < minDiff) {
-        minDiff = diff;
-        closestIndex = i;
-      }
-    }
-    
-    return closestIndex;
-  }
-
-  // 辅助函数：找到请求应该关联的事件索引（考虑时间窗口和事件类型优先级）
-  function findBestEventForRequest(requestTimestamp, requestUrl) {
-    // 首先尝试找到时间窗口内的事件
-    for (let i = 0; i < events.length; i++) {
-      const event = events[i];
-      const eventTimestamp = event.timestamp;
-      const eventType = event.event_details?.action || '';
-      const eventUrl = event.window_context?.url || '';
-      const prevEvent = events[i - 1];
-      const nextEvent = events[i + 1];
-      
-      // 确定时间窗口
-      let windowStart, windowEnd;
-      
-      if (i === 0) {
-        windowStart = recordingStartTime;
-        windowEnd = nextEvent ? nextEvent.timestamp : eventTimestamp + 5000;
-      } else if (eventType === 'page-load') {
-        windowStart = prevEvent ? prevEvent.timestamp : recordingStartTime;
-        windowEnd = nextEvent ? nextEvent.timestamp : Infinity;
-      } else if (eventType === 'click') {
-        windowStart = prevEvent ? prevEvent.timestamp : Math.max(recordingStartTime, eventTimestamp - 5000);
-        windowEnd = nextEvent ? nextEvent.timestamp : eventTimestamp + 5000;
-      } else {
-        windowStart = prevEvent ? prevEvent.timestamp : Math.max(recordingStartTime, eventTimestamp - 2000);
-        windowEnd = nextEvent ? nextEvent.timestamp : eventTimestamp + 2000;
-      }
-      
-      // 检查请求是否在时间窗口内
-      if (requestTimestamp >= windowStart && requestTimestamp < windowEnd) {
-        // 对于非 page-load 事件，还需要检查是否同一站点
-        if (eventType !== 'page-load' && !isSameSite(requestUrl, eventUrl)) {
-          continue;
-        }
-        return i;
-      }
-    }
-    
-    // 如果时间窗口内没有合适的事件，找到时间戳最接近的事件
-    return findClosestEventIndex(requestTimestamp);
-  }
 
   // 初始化每个事件的关联数据
   const eventAssociations = events.map(() => ({
@@ -289,14 +227,95 @@ async function processCorrelation() {
     dynamicResources: []
   }));
 
-  // 第一步：关联 API 请求到最接近的事件
+  // 辅助函数：确定事件的影响时间窗口（请求可能被该事件触发的时间范围）
+  function getEventInfluenceWindow(eventIndex) {
+    const event = events[eventIndex];
+    const eventTimestamp = event.timestamp;
+    const eventType = event.event_details?.action || '';
+    const nextEvent = events[eventIndex + 1];
+    
+    // 确定事件的影响结束时间
+    let influenceEnd;
+    if (eventType === 'click') {
+      // click 事件：影响从事件开始到下一个事件，或5秒（取较长的）
+      // 因为 JS 触发的请求链可能持续一段时间
+      const nextEventTime = nextEvent ? nextEvent.timestamp : Infinity;
+      influenceEnd = Math.max(nextEventTime, eventTimestamp + 5000);
+    } else if (eventType === 'page-load') {
+      // page-load 事件：影响从事件开始到下一个事件
+      // 页面加载时的请求应该都归到 page-load
+      influenceEnd = nextEvent ? nextEvent.timestamp : Infinity;
+    } else if (eventType === 'scroll' || eventType === 'scroll-start' || eventType === 'scroll-end') {
+      // 滚动事件：影响较短，通常不会触发复杂的请求链
+      influenceEnd = nextEvent ? Math.min(nextEvent.timestamp, eventTimestamp + 2000) : eventTimestamp + 2000;
+    } else {
+      // 其他事件（user_context等）：影响到下一个事件
+      influenceEnd = nextEvent ? nextEvent.timestamp : eventTimestamp + 2000;
+    }
+    
+    return {
+      start: eventTimestamp,
+      end: influenceEnd,
+      type: eventType
+    };
+  }
+
+  // 第一步：为每个事件计算其影响窗口
+  const eventInfluenceWindows = events.map((_, index) => getEventInfluenceWindow(index));
+
+  // 第二步：关联 API 请求
+  // 对于每个请求，找到可能触发它的所有事件，然后选择最可能的一个
   reportProgress('associating', 1, 3, '关联 API 请求...');
+  
   for (const req of apiRequests) {
     const reqId = `${req.timestamp}_${req.url}`;
     if (usedApiRequests.has(reqId)) continue;
     
-    const eventIndex = findBestEventForRequest(req.timestamp, req.url);
-    if (eventIndex >= 0) {
+    // 找到所有可能影响该请求的事件（请求时间在事件影响窗口内）
+    const candidateEvents = [];
+    
+    for (let i = 0; i < events.length; i++) {
+      const window = eventInfluenceWindows[i];
+      const event = events[i];
+      const eventUrl = event.window_context?.url || '';
+      
+      // 检查请求是否在事件的影响窗口内
+      if (req.timestamp >= window.start && req.timestamp < window.end) {
+        // 对于非 page-load 事件，检查是否同一站点
+        if (window.type !== 'page-load' && !isSameSite(req.url, eventUrl)) {
+          continue;
+        }
+        
+        // 计算优先级：click 和 page-load 优先级较高
+        let priority = 0;
+        if (window.type === 'click') priority = 3;
+        else if (window.type === 'page-load') priority = 2;
+        else if (window.type === 'scroll-start' || window.type === 'scroll-end') priority = 1;
+        else priority = 0;
+        
+        // 计算时间差（越小越好）
+        const timeDiff = req.timestamp - window.start;
+        
+        candidateEvents.push({
+          index: i,
+          priority: priority,
+          timeDiff: timeDiff,
+          window: window
+        });
+      }
+    }
+    
+    if (candidateEvents.length > 0) {
+      // 选择最佳事件：优先级高 -> 时间差小
+      candidateEvents.sort((a, b) => {
+        if (b.priority !== a.priority) {
+          return b.priority - a.priority; // 优先级高的在前
+        }
+        return a.timeDiff - b.timeDiff; // 时间差小的在前
+      });
+      
+      const bestEvent = candidateEvents[0];
+      const eventIndex = bestEvent.index;
       const event = events[eventIndex];
       const response = apiResponses[req.url];
       const bodyInfo = apiBodies[req.timestamp];
@@ -322,14 +341,25 @@ async function processCorrelation() {
     }
   }
 
-  // 第二步：关联静态资源到最接近的事件
+  // 第三步：关联静态资源（按时间戳最接近）
   reportProgress('associating', 2, 3, '关联静态资源...');
   for (const res of staticResources) {
     if (usedStaticResources.has(res.filename)) continue;
     
-    const eventIndex = findClosestEventIndex(res.timestamp);
-    if (eventIndex >= 0) {
-      eventAssociations[eventIndex].staticResources.push({
+    // 找到时间戳最接近的事件
+    let closestIndex = -1;
+    let minDiff = Infinity;
+    
+    for (let i = 0; i < events.length; i++) {
+      const diff = Math.abs(events[i].timestamp - res.timestamp);
+      if (diff < minDiff) {
+        minDiff = diff;
+        closestIndex = i;
+      }
+    }
+    
+    if (closestIndex >= 0) {
+      eventAssociations[closestIndex].staticResources.push({
         filename: res.filename,
         path: res.path,
         timestamp: res.timestamp,
@@ -339,15 +369,26 @@ async function processCorrelation() {
     }
   }
 
-  // 第三步：关联动态资源到最接近的事件
+  // 第四步：关联动态资源（按时间戳最接近）
   reportProgress('associating', 3, 3, '关联动态资源...');
   for (const res of dynamicResourcesList) {
     const resId = `${res.timestamp || 0}_${res.url}`;
     if (usedDynamicResources.has(resId)) continue;
     
-    const eventIndex = findClosestEventIndex(res.timestamp || 0);
-    if (eventIndex >= 0) {
-      eventAssociations[eventIndex].dynamicResources.push({
+    // 找到时间戳最接近的事件
+    let closestIndex = -1;
+    let minDiff = Infinity;
+    
+    for (let i = 0; i < events.length; i++) {
+      const diff = Math.abs(events[i].timestamp - (res.timestamp || 0));
+      if (diff < minDiff) {
+        minDiff = diff;
+        closestIndex = i;
+      }
+    }
+    
+    if (closestIndex >= 0) {
+      eventAssociations[closestIndex].dynamicResources.push({
         url: res.url,
         type: res.type,
         status: res.status,
