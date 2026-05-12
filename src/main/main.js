@@ -721,10 +721,11 @@ function createMainWindow() {
         break;
 
       case 'sentinel-page-loaded':
-        log.info('Webview page loaded:', data.url);
+        log.info('[Main] Webview page loaded received:', data.url, 'timestamp:', data.timestamp);
         {
           // 使用后端生成的时间戳，确保与网络请求时间戳一致
           const timestamp = Date.now();
+          log.info('[Main] Recording page-load event, timestamp:', timestamp, 'startTime:', globalState.currentTask?.startTime);
           // 只有第一次页面加载使用 snapshot_initial.json，后续使用 timestamp 文件名
           const isInitial = !globalState.initialSnapshotSaved;
           recordUserAction({
@@ -735,6 +736,7 @@ function createMainWindow() {
             domSnapshotFileName: isInitial ? 'snapshot_initial.json' : `snapshot_${timestamp}.json`,
             domSnapshotPath: isInitial ? 'dom/snapshot_initial.json' : `dom/snapshot_${timestamp}.json`
           });
+          log.info('[Main] Page-load event recorded, isInitial:', isInitial);
         }
         break;
 
@@ -1395,11 +1397,14 @@ async function startRecording(taskConfig = {}) {
   );
 
   // 记录任务开始事件
+  log.info('[startRecording] Generating task_start event...');
   const startEvent = globalState.dataSchemaManager.generateUserContextEvent({
     type: 'task_start',
     description: `Task started: ${taskConfig.name || taskId}`
   });
+  log.info('[startRecording] Task start event generated:', startEvent?.event_details?.action, 'timestamp:', startEvent?.timestamp, 'video_time:', startEvent?.video_time);
   appendToManifest(startEvent);
+  log.info('[startRecording] Task start event appended to manifest');
 
   // 视频录制现在在 renderer 进程中完成
   // 主进程只负责视频转换
@@ -1925,6 +1930,11 @@ function appendToManifest(event) {
 
   const line = JSON.stringify(fullEvent) + '\n';
   globalState.manifestStream.write(line);
+  
+  // Windows: 强制刷新确保立即写入
+  if (process.platform === 'win32') {
+    globalState.manifestStream.uncork();
+  }
 }
 
 // 资源路径映射（URL -> 相对路径）

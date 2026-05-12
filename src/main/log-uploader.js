@@ -27,8 +27,12 @@ class LogUploader {
         return;
       }
 
+      log.info(`[LogUploader] Starting upload for: ${logPath}`);
+
       const logContent = fs.readFileSync(logPath, 'utf-8');
       const logSize = fs.statSync(logPath).size;
+
+      log.info(`[LogUploader] Log file size: ${logSize} bytes`);
 
       // 构建上传数据
       const uploadData = {
@@ -44,10 +48,14 @@ class LogUploader {
 
       const postData = JSON.stringify(uploadData);
 
+      log.info(`[LogUploader] Upload data size: ${Buffer.byteLength(postData)} bytes`);
+
       // 解析服务器URL
       const url = new URL(this.serverUrl + this.uploadEndpoint);
       const isHttps = url.protocol === 'https:';
       const client = isHttps ? https : http;
+
+      log.info(`[LogUploader] Server: ${url.hostname}:${url.port || (isHttps ? 443 : 80)}`);
 
       const options = {
         hostname: url.hostname,
