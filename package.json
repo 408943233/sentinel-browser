@@ -61,6 +61,13 @@
         "filter": [
           "**/*"
         ]
+      },
+      {
+        "from": "scripts/",
+        "to": "scripts/",
+        "filter": [
+          "**/*"
+        ]
       }
     ],
     "asar": true,

@@ -1465,9 +1465,23 @@ async function stopRecording() {
 
     // 异步运行后处理关联脚本，支持进度报告
     const runCorrelationWithProgress = async () => {
-      const scriptPath = path.join(__dirname, '..', '..', 'scripts', 'post-process-correlation.js');
+      // 根据是否打包选择正确的脚本路径
+      // 开发环境：使用源码目录
+      // 打包后：使用 extraResources 目录 (process.resourcesPath)
+      const isPackaged = app.isPackaged;
+      let scriptPath;
+      if (isPackaged) {
+        // 打包后，脚本在 resources/scripts/ 目录
+        scriptPath = path.join(process.resourcesPath, 'scripts', 'post-process-correlation.js');
+      } else {
+        // 开发环境，脚本在项目根目录的 scripts/ 目录
+        scriptPath = path.join(__dirname, '..', '..', 'scripts', 'post-process-correlation.js');
+      }
+      
+      log.info('Looking for correlation script at:', scriptPath);
+      
       if (!fs.existsSync(scriptPath)) {
-        log.warn('Post-process correlation script not found');
+        log.warn('Post-process correlation script not found at:', scriptPath);
         return { success: false, error: 'Script not found' };
       }
 
