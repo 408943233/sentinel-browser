@@ -106,10 +106,17 @@ const ErrorDetector = require('./error-detector');
 const LineageTracker = require('./lineage-tracker');
 const DataSchemaManager = require('./data-schema');
 
-// 配置日志 - 只输出到终端，不写入文件
+// 配置日志 - 同时输出到终端和文件
 log.initialize();
-log.transports.file.level = false;  // 禁用文件日志
+log.transports.file.level = 'debug';
 log.transports.console.level = 'debug';
+
+// 设置日志文件路径
+const logDir = path.join(app.getPath('userData'), 'logs');
+if (!fs.existsSync(logDir)) {
+  fs.mkdirSync(logDir, { recursive: true });
+}
+log.transports.file.resolvePathFn = () => path.join(logDir, 'main.log');
 
 // 全局状态
 const globalState = {
