@@ -1541,6 +1541,9 @@ async function stopRecording() {
         });
       });
     }
+
+    // 清空当前任务
+    globalState.currentTask = null;
   }
 }
 
