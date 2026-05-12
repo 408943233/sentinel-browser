@@ -196,7 +196,20 @@ async function processCorrelation() {
 
   // 找到第一个事件的时间戳（用于关联初始资源）
   const firstEventTimestamp = events.length > 0 ? events[0].timestamp : 0;
-  const recordingStartTime = firstEventTimestamp - 10000; // 假设录制在第一个事件前 10 秒开始
+  
+  // 找到最早的 API 请求时间戳
+  const earliestApiTimestamp = apiRequests.length > 0 ? Math.min(...apiRequests.map(r => r.timestamp)) : firstEventTimestamp;
+  const earliestResourceTimestamp = staticResources.length > 0 ? Math.min(...staticResources.map(r => r.timestamp)) : firstEventTimestamp;
+  const earliestTimestamp = Math.min(earliestApiTimestamp, earliestResourceTimestamp);
+  
+  // 录制开始时间：取最早的网络请求时间或第一个事件前30秒（取更早的）
+  // 这样可以确保捕获页面加载时的所有请求
+  const recordingStartTime = Math.min(earliestTimestamp, firstEventTimestamp - 30000);
+  
+  console.log(`Recording start time: ${recordingStartTime}`);
+  console.log(`First event time: ${firstEventTimestamp}`);
+  console.log(`Earliest API request: ${earliestApiTimestamp}`);
+  console.log(`Time difference: ${firstEventTimestamp - earliestTimestamp}ms`);
 
   // 为每个事件关联网络数据
   let associatedCount = 0;
@@ -220,19 +233,25 @@ async function processCorrelation() {
     // 确定时间窗口
     let windowStart, windowEnd;
     
-    if (eventType === 'page-load') {
+    if (i === 0) {
+      // 第一个事件：从录制开始时间到下一个事件
+      // 这样可以捕获页面加载时的所有请求
+      windowStart = recordingStartTime;
+      windowEnd = nextEvent ? nextEvent.timestamp : eventTimestamp + 5000;
+    } else if (eventType === 'page-load') {
       // page-load 事件：
       // - 如果是第一个事件，从录制开始时间到下一个事件
       // - 否则，从前一个事件到下一个事件
       windowStart = prevEvent ? prevEvent.timestamp : recordingStartTime;
       windowEnd = nextEvent ? nextEvent.timestamp : Infinity;
     } else if (eventType === 'click') {
-      // click 事件：从点击时间到下一个事件（或 5 秒后）
-      windowStart = eventTimestamp;
+      // click 事件：从前一个事件（或5秒前）到下一个事件（或 5 秒后）
+      // 这样可以捕获点击前的页面加载请求和点击后的响应
+      windowStart = prevEvent ? prevEvent.timestamp : Math.max(recordingStartTime, eventTimestamp - 5000);
       windowEnd = nextEvent ? nextEvent.timestamp : eventTimestamp + 5000;
     } else {
-      // 其他事件：使用默认窗口
-      windowStart = eventTimestamp;
+      // 其他事件：从前一个事件（或2秒前）到下一个事件（或 2 秒后）
+      windowStart = prevEvent ? prevEvent.timestamp : Math.max(recordingStartTime, eventTimestamp - 2000);
       windowEnd = nextEvent ? nextEvent.timestamp : eventTimestamp + 2000;
     }
 
