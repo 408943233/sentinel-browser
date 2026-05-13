@@ -33,9 +33,14 @@ jobs:
         GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
     - name: List dist directory
+      shell: pwsh
       run: |
-        echo "=== Dist directory contents ==="
-        dir dist /s /b || echo "Dist directory not found or empty"
+        Write-Host "=== Dist directory contents ==="
+        if (Test-Path dist) {
+          Get-ChildItem dist -Recurse | ForEach-Object { $_.FullName }
+        } else {
+          Write-Host "Dist directory not found or empty"
+        }
 
     - name: Upload artifacts
       uses: actions/upload-artifact@v4
