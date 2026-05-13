@@ -48,3 +48,11 @@ userdata/
 userData/
 .task-*
 *.task
+
+# Recorded task data (collections)
+collections/
+output/
+
+# Temporary files
+*.tmp
+*.temp

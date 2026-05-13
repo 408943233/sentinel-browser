@@ -2057,6 +2057,10 @@ function handlePageLoadComplete() {
   
   console.log('[Sentinel Webview] Page-load-complete event sent to host, eventId:', eventId, 'duration:', duration);
 
+  // 【修复】页面加载完成后，立即生成 initial DOM snapshot
+  console.log('[Sentinel Webview] Creating initial DOM snapshot after page load');
+  saveDOMSnapshot('initial', timestamp);
+
   initMutationObserver();
   console.log('[Sentinel Webview] MutationObserver initialized on page load complete');
 
