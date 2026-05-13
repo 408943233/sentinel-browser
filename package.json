@@ -108,7 +108,8 @@
             "x64"
           ]
         }
-      ]
+      ],
+      "publish": null
     },
     "nsis": {
       "oneClick": true,
@@ -123,9 +124,7 @@
       "runAfterFinish": true,
       "menuCategory": false
     },
-    "portable": {
-      "artifactName": "${productName}-Portable-${version}.${ext}"
-    },
+
     "publish": null
   }
 }
