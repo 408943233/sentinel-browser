@@ -158,7 +158,23 @@ class WatchdogManager {
 
     log.info('Stopping watchdog...');
     
+    // 发送 SIGTERM 信号
     this.watchdogProcess.kill('SIGTERM');
+    
+    // 设置超时，如果进程不响应则强制终止
+    const forceKillTimeout = setTimeout(() => {
+      if (this.watchdogProcess && !this.watchdogProcess.killed) {
+        log.warn('Watchdog did not respond to SIGTERM, forcing kill...');
+        this.watchdogProcess.kill('SIGKILL');
+      }
+    }, 5000); // 5秒超时
+    
+    // 监听进程退出
+    this.watchdogProcess.on('exit', (code, signal) => {
+      clearTimeout(forceKillTimeout);
+      log.info('Watchdog stopped with code:', code, 'signal:', signal);
+    });
+    
     this.isRunning = false;
     
     // 清理心跳文件

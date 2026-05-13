@@ -435,7 +435,15 @@ class SentinelRenderer {
       console.log('[Sentinel] Webview loaded:', url);
       console.log('[Sentinel] Webview actual src:', webview.src);
       this.updateCurrentUrl(url);
-      this.injectClickTracker(webview);
+      
+      // 延迟注入，确保 webview 完全就绪
+      setTimeout(() => {
+        console.log('[Sentinel] About to inject click tracker...');
+        this.injectClickTracker(webview);
+        console.log('[Sentinel] About to inject CausalChainTracker...');
+        this.injectCausalChainTracker(webview);
+        console.log('[Sentinel] Injection complete');
+      }, 1000);
 
       // 更新标签卡标题
       webview.executeJavaScript('document.title').then(title => {
@@ -445,6 +453,17 @@ class SentinelRenderer {
         tab.title = url;
         this.updateTabTitle(tabId, url);
       });
+    });
+
+    // 页面开始加载时立即创建 page-load-start 事件（比 preload 脚本更早）
+    webview.addEventListener('did-start-loading', () => {
+      console.log('[Sentinel Renderer] Page started loading:', webview.src);
+      if (window.sentinelAPI && window.sentinelAPI.reportPageLoadStart) {
+        window.sentinelAPI.reportPageLoadStart({
+          url: webview.src,
+          timestamp: Date.now()
+        });
+      }
     });
 
     webview.addEventListener('did-navigate', (e) => {
@@ -512,6 +531,26 @@ class SentinelRenderer {
 
       switch (channel) {
         case 'sentinel-click':
+          console.log('[Sentinel Renderer] Click received, setting causal chain context:', args[0]);
+          // 设置因果链上下文 - 使用注入的 causalChain
+          webview.executeJavaScript(`
+            (function() {
+              if (window.causalChain && window.causalChain.setCurrentEvent) {
+                window.causalChain.setCurrentEvent('${args[0].eventId || 'evt_' + Date.now()}', {
+                  type: 'click',
+                  xpath: '${args[0].xpath || ''}',
+                  selector: '${args[0].selector || ''}',
+                  url: '${args[0].url || ''}'
+                });
+                console.log('[CausalChain] Context set for click:', '${args[0].eventId || 'evt_' + Date.now()}');
+              } else {
+                console.warn('[CausalChain] causalChain not available');
+              }
+            })();
+          `).catch(err => {
+            console.error('[Sentinel Renderer] Failed to set causal chain context:', err);
+          });
+          
           if (window.sentinelAPI && window.sentinelAPI.reportUserAction) {
             window.sentinelAPI.reportUserAction(args[0]);
           }
@@ -519,6 +558,19 @@ class SentinelRenderer {
           if (webview && args[0]) {
             webview.send('trigger-dom-snapshot', { type: 'incremental', timestamp: args[0].timestamp });
           }
+          // 延迟清除因果链上下文
+          setTimeout(() => {
+            webview.executeJavaScript(`
+              (function() {
+                if (window.causalChain && window.causalChain.clearCurrentEvent) {
+                  window.causalChain.clearCurrentEvent();
+                  console.log('[CausalChain] Context cleared after click');
+                }
+              })();
+            `).catch(err => {
+              console.error('[Sentinel Renderer] Failed to clear causal chain context:', err);
+            });
+          }, 5000); // 5秒后清除上下文
           break;
         case 'sentinel-input':
           console.log('[Sentinel Renderer] Input received from webview:', args[0]?.selector);
@@ -687,6 +739,198 @@ class SentinelRenderer {
     });
   }
 
+  // 注入 CausalChainTracker 到 webview（方案二：动态注入）
+  injectCausalChainTracker(webview) {
+    console.log('[Sentinel Renderer] Starting CausalChainTracker injection...');
+    const script = `
+      (function() {
+        if (window.__causalChainTrackerInstalled) return;
+        window.__causalChainTrackerInstalled = true;
+        
+        console.log('[CausalChain] Starting injection...');
+        
+        // 简化的 AsyncContextTracker
+        class AsyncContextTracker {
+          constructor() {
+            this.contextStack = [];
+            this.currentEventId = null;
+            this.contextMap = new Map();
+            this.contextId = 0;
+          }
+          
+          createContext(eventId, eventType, metadata = {}) {
+            const contextId = ++this.contextId;
+            const context = {
+              id: contextId,
+              eventId: eventId,
+              eventType: eventType,
+              createdAt: Date.now(),
+              metadata: metadata
+            };
+            
+            this.contextMap.set(contextId, context);
+            this.contextStack.push(context);
+            this.currentEventId = eventId;
+            
+            console.log('[AsyncContextTracker] Context created:', contextId, eventId);
+            return context;
+          }
+          
+          getCurrentEventId() {
+            return this.currentEventId;
+          }
+          
+          clearCurrentContext() {
+            if (this.contextStack.length > 0) {
+              const context = this.contextStack.pop();
+              this.currentEventId = this.contextStack.length > 0 
+                ? this.contextStack[this.contextStack.length - 1].eventId 
+                : null;
+              console.log('[AsyncContextTracker] Context cleared:', context.id);
+            }
+          }
+        }
+        
+        const asyncContext = new AsyncContextTracker();
+        
+        // 拦截 fetch
+        const originalFetch = window.fetch;
+        window.fetch = async function(input, init = {}) {
+          init = init || {};
+          const eventId = asyncContext.getCurrentEventId();
+          const url = typeof input === 'string' ? input : input.url;
+          const method = init.method || 'GET';
+          
+          console.log('[CausalChain] fetch intercepted:', url, 'eventId:', eventId);
+          
+          // 添加因果链 ID 到请求头
+          if (eventId) {
+            init.headers = init.headers || {};
+            init.headers['X-Causal-Chain-ID'] = eventId;
+          }
+          
+          // 发送请求开始事件到主进程
+          try {
+            const { ipcRenderer } = require('electron');
+            ipcRenderer.sendToHost('sentinel-request-start', {
+              requestId: 'fetch_' + Date.now() + '_' + Math.random().toString(36).substr(2, 9),
+              eventId: eventId,
+              type: 'fetch',
+              url: url,
+              method: method,
+              timestamp: Date.now()
+            });
+          } catch(err) {
+            console.log('[CausalChain] Failed to send request-start:', err.message);
+          }
+          
+          try {
+            const response = await originalFetch.call(this, input, init);
+            
+            // 发送请求完成事件到主进程
+            try {
+              const { ipcRenderer } = require('electron');
+              ipcRenderer.sendToHost('sentinel-request-complete', {
+                requestId: 'fetch_' + Date.now() + '_' + Math.random().toString(36).substr(2, 9),
+                eventId: eventId,
+                type: 'fetch',
+                url: url,
+                method: method,
+                status: response.status,
+                timestamp: Date.now()
+              });
+            } catch(err) {
+              console.log('[CausalChain] Failed to send request-complete:', err.message);
+            }
+            
+            return response;
+          } catch (error) {
+            console.log('[CausalChain] fetch error:', error.message);
+            throw error;
+          }
+        };
+        
+        // 拦截 XMLHttpRequest
+        const originalOpen = XMLHttpRequest.prototype.open;
+        const originalSend = XMLHttpRequest.prototype.send;
+        
+        XMLHttpRequest.prototype.open = function(method, url, ...rest) {
+          this._sentinelMethod = method;
+          this._sentinelUrl = url;
+          return originalOpen.apply(this, arguments);
+        };
+        
+        XMLHttpRequest.prototype.send = function(body) {
+          const eventId = asyncContext.getCurrentEventId();
+          this._sentinelEventId = eventId;
+          
+          console.log('[CausalChain] XHR intercepted:', this._sentinelUrl, 'eventId:', eventId);
+          
+          // 添加因果链 ID 到请求头
+          if (eventId) {
+            this.setRequestHeader('X-Causal-Chain-ID', eventId);
+          }
+          
+          // 发送请求开始事件
+          try {
+            const { ipcRenderer } = require('electron');
+            ipcRenderer.sendToHost('sentinel-request-start', {
+              requestId: 'xhr_' + Date.now() + '_' + Math.random().toString(36).substr(2, 9),
+              eventId: eventId,
+              type: 'xhr',
+              url: this._sentinelUrl,
+              method: this._sentinelMethod,
+              timestamp: Date.now()
+            });
+          } catch(err) {
+            console.log('[CausalChain] Failed to send XHR start:', err.message);
+          }
+          
+          // 监听请求完成
+          this.addEventListener('load', () => {
+            try {
+              const { ipcRenderer } = require('electron');
+              ipcRenderer.sendToHost('sentinel-request-complete', {
+                requestId: 'xhr_' + Date.now() + '_' + Math.random().toString(36).substr(2, 9),
+                eventId: eventId,
+                type: 'xhr',
+                url: this._sentinelUrl,
+                method: this._sentinelMethod,
+                status: this.status,
+                timestamp: Date.now()
+              });
+            } catch(err) {
+              console.log('[CausalChain] Failed to send XHR complete:', err.message);
+            }
+          });
+          
+          return originalSend.apply(this, arguments);
+        };
+        
+        // 暴露 causalChain 到全局
+        window.causalChain = {
+          setCurrentEvent: (eventId, metadata) => {
+            return asyncContext.createContext(eventId, 'user-action', metadata);
+          },
+          getCurrentEventId: () => {
+            return asyncContext.getCurrentEventId();
+          },
+          clearCurrentEvent: () => {
+            asyncContext.clearCurrentContext();
+          }
+        };
+        
+        console.log('[CausalChain] Tracker injected successfully');
+      })();
+    `;
+    
+    webview.executeJavaScript(script).then(() => {
+      console.log('[Sentinel Renderer] CausalChainTracker injected into webview');
+    }).catch(err => {
+      console.error('[Sentinel Renderer] Failed to inject CausalChainTracker:', err);
+    });
+  }
+
   updateCurrentUrl(url) {
     document.getElementById('current-url').textContent = url;
   }
@@ -709,15 +953,18 @@ class SentinelRenderer {
   // 任务管理
   async showTaskModal() {
     // Windows 平台：先选择存储目录（只选择一次，后续延用）
+    // macOS/Linux：无需选择，使用默认路径
     if (window.sentinelAPI.selectStorageDirectory && !this.storagePath) {
       try {
         const storagePath = await window.sentinelAPI.selectStorageDirectory();
-        if (!storagePath) {
-          console.log('[Sentinel] No storage directory selected');
-          return;
+        if (storagePath) {
+          // Windows 平台：用户选择了存储目录
+          this.storagePath = storagePath;
+          console.log('[Sentinel] Storage directory selected:', storagePath);
+        } else {
+          // macOS/Linux 平台：返回 null，使用默认路径
+          console.log('[Sentinel] Using default storage path for macOS/Linux');
         }
-        this.storagePath = storagePath;
-        console.log('[Sentinel] Storage directory selected:', storagePath);
       } catch (error) {
         console.error('[Sentinel] Failed to select storage directory:', error);
         alert('选择存储目录失败: ' + error.message);
@@ -1003,17 +1250,40 @@ class SentinelRenderer {
         await new Promise(resolve => setTimeout(resolve, 1000));
       }
 
-      // 使用 getUserMedia 获取窗口流（初始版本实现）
+      // 修复：获取窗口实际尺寸
+      let windowWidth = 1920;
+      let windowHeight = 1080;
+      try {
+        const windowBounds = await window.sentinelAPI.getCurrentWindowBounds();
+        if (windowBounds) {
+          windowWidth = windowBounds.width || 1920;
+          windowHeight = windowBounds.height || 1080;
+          console.log('[Sentinel] Window actual size:', windowWidth, 'x', windowHeight);
+        }
+      } catch (err) {
+        console.warn('[Sentinel] Failed to get window bounds:', err);
+      }
+
+      // 修复：确保窗口置顶，避免被其他窗口遮挡
+      try {
+        await window.sentinelAPI.focusCurrentWindow();
+        console.log('[Sentinel] Window focused to avoid occlusion');
+      } catch (err) {
+        console.warn('[Sentinel] Failed to focus window:', err);
+      }
+
+      // 修复：使用桌面捕获但指定窗口ID，使用实际窗口尺寸
+      // 注意：Electron 中 chromeMediaSource 必须是 'desktop'，通过 chromeMediaSourceId 指定窗口
       const stream = await navigator.mediaDevices.getUserMedia({
         audio: false,
         video: {
           mandatory: {
             chromeMediaSource: 'desktop',
             chromeMediaSourceId: source.id,
-            minWidth: 1280,
-            maxWidth: 1920,
-            minHeight: 720,
-            maxHeight: 1080
+            minWidth: 640,
+            maxWidth: windowWidth,
+            minHeight: 480,
+            maxHeight: windowHeight
           }
         }
       });

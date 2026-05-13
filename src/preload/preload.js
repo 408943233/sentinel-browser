@@ -1,7 +1,7 @@
 const { contextBridge, ipcRenderer } = require('electron');
 
 // Sentinel API - 暴露给渲染进程的安全接口
-contextBridge.exposeInMainWorld('sentinelAPI', {
+const api = {
   // 录制控制
   startRecording: (config) => ipcRenderer.invoke('start-recording', config),
   stopRecording: () => ipcRenderer.invoke('stop-recording'),
@@ -11,9 +11,6 @@ contextBridge.exposeInMainWorld('sentinelAPI', {
   // 任务管理
   getTasks: () => ipcRenderer.invoke('get-tasks'),
   exportTask: (taskId) => ipcRenderer.invoke('export-task', taskId),
-
-  // 存储目录选择（Windows）
-  selectStorageDirectory: () => ipcRenderer.invoke('select-storage-directory'),
 
   // 事件监听
   onRecordingStarted: (callback) => {
@@ -87,6 +84,11 @@ contextBridge.exposeInMainWorld('sentinelAPI', {
     ipcRenderer.send('user-action', actionData);
   },
 
+  // 页面加载开始报告（从 renderer.js 调用，比 preload 脚本更早）
+  reportPageLoadStart: (loadData) => {
+    ipcRenderer.send('page-load-start', loadData);
+  },
+
   // DOM 快照保存
   saveDOMSnapshot: (snapshotData) => {
     ipcRenderer.send('dom-snapshot', snapshotData);
@@ -115,6 +117,12 @@ contextBridge.exposeInMainWorld('sentinelAPI', {
 
   // 获取当前窗口ID
   getCurrentWindowId: () => ipcRenderer.invoke('get-current-window-id'),
+
+  // 修复：获取当前窗口尺寸
+  getCurrentWindowBounds: () => ipcRenderer.invoke('get-current-window-bounds'),
+
+  // 修复：聚焦当前窗口（避免被其他窗口遮挡）
+  focusCurrentWindow: () => ipcRenderer.invoke('focus-current-window'),
 
   // 获取元素路径（支持 Shadow DOM）
   getElementPath: (params) => ipcRenderer.invoke('get-element-path', params),
@@ -170,7 +178,7 @@ contextBridge.exposeInMainWorld('sentinelAPI', {
 
     return result;
   }
-});
+};
 
 // Shadow DOM遍历函数
 function traverseShadowDOM(element, path = '') {
@@ -1051,5 +1059,13 @@ window.fetch = async function(...args) {
 
   return response;
 };
+
+// Windows 平台：添加存储目录选择功能
+// macOS/Linux：无需选择，使用默认路径
+// 注意：在 macOS 上调用此 API 会返回 null，renderer.js 应该处理这种情况
+api.selectStorageDirectory = () => ipcRenderer.invoke('select-storage-directory');
+
+// 暴露 API 到渲染进程
+contextBridge.exposeInMainWorld('sentinelAPI', api);
 
 console.log('[Sentinel] Preload script loaded successfully');

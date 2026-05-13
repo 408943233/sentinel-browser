@@ -1,3 +1,113 @@
+/**
+ * ============================================================================
+ * Sentinel Browser - 主进程入口 (main.js)
+ * ============================================================================
+ *
+ * 【核心职责】
+ * 1. 管理 Electron 应用生命周期（启动、退出）
+ * 2. 创建和管理浏览器窗口（主窗口、标签页）
+ * 3. 处理 IPC 通信（与渲染进程、Preload 脚本通信）
+ * 4. 管理录制任务（开始、停止、暂停）
+ * 5. 协调各管理器模块（FFmpeg、CDP、谱系追踪等）
+ * 6. 处理文件下载、资源保存
+ * 7. 生成和导出训练数据
+ *
+ * 【架构设计】
+ *
+ * 1. 初始化阶段
+ *    - 检查系统依赖（Windows VC++ Redist）
+ *    - 配置日志系统
+ *    - 设置用户数据目录
+ *    - 初始化全局状态
+ *
+ * 2. 管理器初始化
+ *    - FFmpegManager: 视频录制和截图
+ *    - WatchdogManager: 监控录制状态
+ *    - ErrorDetector: 错误检测
+ *    - LineageTracker: 窗口谱系追踪
+ *    - StateManager: 状态管理
+ *    - CDPManager: Chrome DevTools Protocol
+ *    - DataSchemaManager: 数据格式验证
+ *    - UnifiedEventManager: 统一事件管理（基于因果关系链）
+ *    - LogUploader: 日志上传
+ *
+ * 3. 窗口管理
+ *    - createMainWindow: 创建主窗口
+ *    - createTabWindow: 创建标签页窗口
+ *    - setupWebviewIPCListeners: 设置 IPC 监听器
+ *
+ * 4. 录制管理
+ *    - startRecording: 开始录制
+ *    - stopRecording: 停止录制
+ *    - pauseRecording/resumeRecording: 暂停/恢复
+ *    - recordUserAction: 记录用户操作
+ *
+ * 5. 数据处理
+ *    - saveResource: 保存静态资源
+ *    - saveDOMSnapshot: 保存 DOM 快照
+ *    - extractSnapshotsFromVideo: 从视频提取截图
+ *    - runCorrelationWithProgress: 运行关联分析
+ *
+ * 【IPC 通信】
+ *
+ * 从 Renderer/Preload 接收：
+ * - sentinel-click: 点击事件
+ * - sentinel-input: 输入事件
+ * - sentinel-scroll*: 滚动事件
+ * - sentinel-keydown: 键盘事件
+ * - sentinel-request-start/complete: 网络请求
+ * - sentinel-websocket*: WebSocket 事件
+ * - sentinel-storage-operation: 存储操作
+ * - sentinel-dom-snapshot: DOM 快照
+ * - sentinel-page-loaded: 页面加载
+ *
+ * 发送到 Renderer：
+ * - recording-started/stopped: 录制状态
+ * - correlation-progress: 关联进度
+ * - snapshot-extraction-progress: 截图进度
+ *
+ * 【数据流】
+ *
+ * 用户操作 -> Preload 拦截 -> IPC 发送 -> Main 接收 -> UnifiedEventManager
+ *     -> 写入 manifest -> 后处理关联 -> 生成训练数据
+ *
+ * 【文件结构】
+ *
+ * 任务目录结构：
+ * task_id/
+ *   ├── training_manifest.jsonl  # 主事件日志
+ *   ├── dom/                     # DOM 快照
+ *   ├── previews/                # 视频截图
+ *   ├── network/                 # 网络资源
+ *   │   ├── resources/          # 静态资源
+ *   │   └── api_bodies/         # API 响应体
+ *   ├── sandbox/                # 浏览器状态
+ *   └── video.mp4               # 录制视频
+ *
+ * 【关键技术】
+ *
+ * 1. 因果关系链追踪
+ *    - 使用 eventId 精确关联事件和请求
+ *    - 替代传统的时间窗口匹配
+ *    - 实现 100% 准确的关联
+ *
+ * 2. rrweb 标准 DOM 序列化
+ *    - 支持完整和增量快照
+ *    - 记录 DOM 变化历史
+ *    - 支持 Shadow DOM
+ *
+ * 3. 视频录制
+ *    - 使用 FFmpeg 录制屏幕
+ *    - 录制结束后提取关键帧
+ *    - 生成预览截图
+ *
+ * 4. 后处理关联
+ *    - 录制结束后运行关联脚本
+ *    - 分析事件和请求的关系
+ *    - 生成完整的关联数据
+ * ============================================================================
+ */
+
 const { app, BrowserWindow, ipcMain, dialog, session, shell, systemPreferences } = require('electron');
 const path = require('path');
 const os = require('os');
@@ -75,9 +185,6 @@ if (process.platform === 'win32') {
   });
 }
 
-// 全局变量，用于存储当前事件的 apiRequests，绕过参数传递问题
-let currentApiRequests = null;
-
 // 设置用户数据目录为应用支持目录（避免 app.asar 只读问题）
 const userDataPath = path.join(app.getPath('userData'), 'SentinelBrowser');
 if (!fs.existsSync(userDataPath)) {
@@ -97,14 +204,12 @@ if (process.platform === 'win32' && app.isPackaged) {
 }
 app.setPath('logs', logsPath);
 
-// 简单的UUID生成函数（不依赖外部模块）
-function generateUUID() {
-  return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, function(c) {
-    const r = Math.random() * 16 | 0;
-    const v = c === 'x' ? r : (r & 0x3 | 0x8);
-    return v.toString(16);
-  });
-}
+// 导入共享工具函数
+const { generateUUID } = require('../shared/utils');
+
+// 导入增强日志工具
+const logger = require('../shared/logger');
+const appLog = logger.create('Main');
 
 // 导入自定义模块
 const CDPManager = require('./cdp-manager');
@@ -116,6 +221,7 @@ const ErrorDetector = require('./error-detector');
 const LineageTracker = require('./lineage-tracker');
 const DataSchemaManager = require('./data-schema');
 const LogUploader = require('./log-uploader');
+const UnifiedEventManager = require('./unified-event-manager');
 
 // 配置日志 - 同时输出到终端和文件
 log.initialize();
@@ -130,10 +236,10 @@ const logFilePath = path.join(logDir, 'main.log');
 try {
   if (!fs.existsSync(logDir)) {
     fs.mkdirSync(logDir, { recursive: true });
-    console.log('[Main] Created log directory:', logDir);
+    appLog.info('Created log directory', { path: logDir });
   }
 } catch (err) {
-  console.error('[Main] Failed to create log directory:', err);
+  appLog.error('Failed to create log directory', err, { path: logDir });
 }
 
 // electron-log v5 配置 - 使用绝对路径
@@ -142,15 +248,24 @@ log.transports.file.resolvePathFn = () => logFilePath;
 // 强制立即写入日志
 log.transports.file.sync = true;
 
-// 记录日志配置信息（使用 log.info 确保写入文件）
-console.log('[Main] Log directory:', logDir);
-console.log('[Main] Log file:', logFilePath);
-log.info('[Main] Logging initialized');
-log.info('[Main] Log directory:', logDir);
-log.info('[Main] Log file:', logFilePath);
-log.info('[Main] Logging initialized');
-log.info('[Main] Log directory:', logDir);
-log.info('[Main] Log file:', logFilePath);
+// 记录日志配置信息
+appLog.info('Logging initialized', {
+  logDir,
+  logFilePath,
+  electronVersion: process.versions.electron,
+  nodeVersion: process.versions.node,
+  platform: process.platform,
+  arch: process.arch
+});
+
+// 记录启动信息
+appLog.info('Application starting', {
+  pid: process.pid,
+  ppid: process.ppid,
+  cwd: process.cwd(),
+  execPath: process.execPath,
+  argv: process.argv
+});
 
 // 全局状态
 const globalState = {
@@ -169,9 +284,11 @@ const globalState = {
   cdpManager: null,
   dataSchemaManager: null,
   logUploader: null, // 日志上传器
+  unifiedEventManager: null, // 统一事件管理器（基于因果关系链）
   manifestStream: null,
   apiLogStream: null,
   consoleErrorStream: null,
+  correlationLogStream: null, // 关联日志流
   stateInjector: null,
   initialSnapshotSaved: false,  // 标记是否已保存初始 DOM snapshot
   isReplayMode: false,
@@ -179,23 +296,26 @@ const globalState = {
   replayTaskDir: null, // 回放任务目录
   docSequence: 0, // PDF 文档序列号计数器
   downloadedPdfs: new Set(), // 已下载的 PDF URL 集合，用于去重
-  pendingEvents: [], // 暂存待写入的事件，等待网络请求完成后再写入
-  flushedEvents: new Map() // 已写入文件的事件缓存（timestamp -> event），用于网络请求延迟关联
+  pendingEvents: [], // 待写入 manifest 的事件队列
+  flushedEvents: new Map(), // 已写入 manifest 的事件缓存（用于后续关联）
+  // DOM 快照去重相关
+  lastDOMSnapshotTime: 0, // 最后一次 DOM 快照时间
+  minDOMSnapshotInterval: 500, // 最小 DOM 快照间隔（毫秒）
+  scrollSequenceSnapshots: new Map() // 滚动序列的快照记录（scrollSequenceId -> lastSnapshotTime）
 };
 
 // 动态资源列表（用于懒加载等资源）
 const dynamicResources = [];
 
-// 网络请求缓冲队列（用于 page-load 事件的延迟关联）
+// API 请求缓冲区（用于请求关联）
 const requestBuffer = [];
-const REQUEST_BUFFER_WINDOW = 10000; // 10 秒的缓冲窗口
 
-// 请求 body 临时存储（用于在 onBeforeRequest 中捕获，在 onCompleted 中使用）
+// 请求体临时存储（用于捕获请求 body）
 const requestBodyMap = new Map();
-const REQUEST_BODY_MAX_SIZE = 10 * 1024 * 1024; // 10MB 大小限制
-const REQUEST_BODY_TTL = 30000; // 30 秒过期时间
+const REQUEST_BODY_MAX_SIZE = 10 * 1024 * 1024; // 10MB
+const REQUEST_BODY_TTL = 60000; // 60秒过期
 
-// 添加动态资源（用于懒加载等资源）
+// 添加动态资源
 function addDynamicResource(resource) {
   dynamicResources.push(resource);
   log.info('Dynamic resource recorded:', resource.url);
@@ -220,25 +340,58 @@ function clearDynamicResources() {
   log.info('Dynamic resources cleared');
 }
 
-// 查找与请求时间戳最接近的事件时间戳（提前定义避免Windows打包问题）
+// 生成唯一ID（用于事件、请求等）
+function generateId(prefix = 'id') {
+  return `${prefix}_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
+}
+
+// 查找与请求时间戳最接近的事件时间戳
+// 注意：此函数已废弃，新的因果关系链追踪使用 eventId 精确关联
+// 保留此函数用于兼容旧代码和备用关联方案
 function findEventTimestampForRequest(requestTimestamp) {
-  // 在 pendingEvents 中查找最接近的事件
-  for (const event of globalState.pendingEvents) {
-    const timeDiff = Math.abs(event.timestamp - requestTimestamp);
-    // 如果在 5 秒内，认为是同一个事件
-    if (timeDiff < 5000) {
-      return event.timestamp;
+  // 基于时间戳的关联逻辑（备用方案）
+  // 优先使用 eventId 关联，此函数仅在 eventId 关联失败时使用
+
+  // 首先尝试在 pendingEvents 中查找
+  if (Array.isArray(globalState.pendingEvents) && globalState.pendingEvents.length > 0) {
+    const TIME_WINDOW = 5000; // 5秒
+    let closestEvent = null;
+    let minDiff = Infinity;
+
+    for (const event of globalState.pendingEvents) {
+      const diff = Math.abs(event.timestamp - requestTimestamp);
+      if (diff < TIME_WINDOW && diff < minDiff) {
+        minDiff = diff;
+        closestEvent = event;
+      }
+    }
+
+    if (closestEvent) {
+      log.debug('Found closest event in pendingEvents:', closestEvent.timestamp, 'diff:', minDiff);
+      return closestEvent.timestamp;
     }
   }
-  
-  // 在已刷新的事件中查找
-  for (const [timestamp, event] of globalState.flushedEvents) {
-    const timeDiff = Math.abs(timestamp - requestTimestamp);
-    if (timeDiff < 5000) {
-      return timestamp;
+
+  // 然后在 flushedEvents 中查找
+  if (globalState.flushedEvents && globalState.flushedEvents.size > 0) {
+    const TIME_WINDOW = 5000; // 5秒
+    let closestTimestamp = null;
+    let minDiff = Infinity;
+
+    for (const [timestamp, event] of globalState.flushedEvents) {
+      const diff = Math.abs(timestamp - requestTimestamp);
+      if (diff < TIME_WINDOW && diff < minDiff) {
+        minDiff = diff;
+        closestTimestamp = timestamp;
+      }
+    }
+
+    if (closestTimestamp) {
+      log.debug('Found closest event in flushedEvents:', closestTimestamp, 'diff:', minDiff);
+      return closestTimestamp;
     }
   }
-  
+
   return null;
 }
 
@@ -246,12 +399,17 @@ function findEventTimestampForRequest(requestTimestamp) {
 let STORAGE_PATH = null;
 
 const getDefaultStoragePath = () => {
-  // Windows 使用用户数据目录，macOS/Linux 使用 /tmp
-  if (process.platform === 'win32') {
-    return path.join(app.getPath('userData'), 'SentinelBrowser', 'collections');
+  // 使用项目本地目录避免 macOS TCC 权限问题
+  const localPath = path.join(__dirname, '..', '..', 'collections');
+  if (!fs.existsSync(localPath)) {
+    try {
+      fs.mkdirSync(localPath, { recursive: true });
+    } catch (err) {
+      console.warn('Failed to create local collections dir, falling back to userData:', err.message);
+      return path.join(app.getPath('userData'), 'collections');
+    }
   }
-  // 使用 /tmp 目录避免 macOS iCloud 和权限问题
-  return path.join('/tmp', 'SentinelBrowser', 'collections');
+  return localPath;
 };
 
 // 选择存储目录（Windows 在启动任务时调用）
@@ -280,29 +438,73 @@ async function selectStorageDirectory(mainWindow) {
 
 // 初始化管理器
 function initializeManagers() {
+  const timer = appLog.timer('initializeManagers');
+  
   // 避免重复初始化
   if (globalState.ffmpegManager) {
-    log.debug('Managers already initialized, skipping...');
+    appLog.debug('Managers already initialized, skipping', {
+      existingManagers: Object.keys(globalState).filter(k => globalState[k] !== null && k !== 'windows')
+    });
     return;
   }
 
-  log.info('Initializing managers...');
+  appLog.info('Initializing managers', {
+    platform: process.platform,
+    storagePath: STORAGE_PATH || 'not set (will use default)'
+  });
 
   // Windows 平台：等待用户选择存储目录，不自动设置默认路径
   if (!STORAGE_PATH && process.platform !== 'win32') {
-    log.warn('STORAGE_PATH not set, using default path');
+    appLog.warn('STORAGE_PATH not set, using default path', {
+      defaultPath: getDefaultStoragePath()
+    });
     STORAGE_PATH = getDefaultStoragePath();
   }
 
-  globalState.ffmpegManager = new FFmpegManager();
-  globalState.watchdogManager = new WatchdogManager();
-  globalState.errorDetector = new ErrorDetector();
-  globalState.lineageTracker = new LineageTracker();
-  globalState.stateManager = new StateManager(STORAGE_PATH);
-  globalState.cdpManager = new CDPManager();
-  globalState.dataSchemaManager = new DataSchemaManager();
-  globalState.stateInjector = new StateInjector();
-  globalState.logUploader = new LogUploader('http://42.193.126.52');
+  try {
+    appLog.debug('Creating FFmpegManager');
+    globalState.ffmpegManager = new FFmpegManager();
+    appLog.debug('FFmpegManager created successfully');
+
+    appLog.debug('Creating WatchdogManager');
+    globalState.watchdogManager = new WatchdogManager();
+    appLog.debug('WatchdogManager created successfully');
+
+    appLog.debug('Creating ErrorDetector');
+    globalState.errorDetector = new ErrorDetector();
+    appLog.debug('ErrorDetector created successfully');
+
+    appLog.debug('Creating LineageTracker');
+    globalState.lineageTracker = new LineageTracker();
+    appLog.debug('LineageTracker created successfully');
+
+    appLog.debug('Creating StateManager', { storagePath: STORAGE_PATH });
+    globalState.stateManager = new StateManager(STORAGE_PATH);
+    appLog.debug('StateManager created successfully');
+
+    appLog.debug('Creating CDPManager');
+    globalState.cdpManager = new CDPManager();
+    appLog.debug('CDPManager created successfully');
+
+    appLog.debug('Creating DataSchemaManager');
+    globalState.dataSchemaManager = new DataSchemaManager();
+    appLog.debug('DataSchemaManager created successfully');
+
+    appLog.debug('Creating StateInjector');
+    globalState.stateInjector = new StateInjector();
+    appLog.debug('StateInjector created successfully');
+
+    appLog.debug('Creating LogUploader');
+    globalState.logUploader = new LogUploader('http://42.193.126.52');
+    appLog.debug('LogUploader created successfully');
+
+    appLog.info('All managers initialized successfully');
+    timer.end({ managerCount: 9 });
+  } catch (error) {
+    appLog.error('Failed to initialize managers', error);
+    timer.end({ error: true });
+    throw error;
+  }
 
   log.info('Managers initialized successfully');
 }
@@ -400,6 +602,13 @@ function createReplayWindow(taskDir, url) {
 
 // 创建主窗口
 function createMainWindow() {
+  const timer = appLog.timer('createMainWindow');
+  appLog.info('Creating main window', {
+    windowSize: { width: 1400, height: 900 },
+    platform: process.platform,
+    preloadPath: path.join(__dirname, '..', 'preload', 'preload.js')
+  });
+
   const mainWindow = new BrowserWindow({
     width: 1400,
     height: 900,
@@ -418,13 +627,18 @@ function createMainWindow() {
     autoHideMenuBar: true
   });
 
+  appLog.debug('Main window created', { windowId: mainWindow.id });
+
   // Windows 平台隐藏菜单栏
   if (process.platform === 'win32') {
     mainWindow.setMenuBarVisibility(false);
+    appLog.debug('Menu bar hidden for Windows');
   }
 
   // 加载渲染进程
-  mainWindow.loadFile(path.join(__dirname, '..', 'renderer', 'index.html'));
+  const rendererPath = path.join(__dirname, '..', 'renderer', 'index.html');
+  appLog.debug('Loading renderer', { path: rendererPath });
+  mainWindow.loadFile(rendererPath);
 
   // 开发工具 - 默认不打开，需要时按 Ctrl+Shift+I 或 Cmd+Option+I 打开
   // if (!app.isPackaged) {
@@ -432,10 +646,13 @@ function createMainWindow() {
   // }
 
   mainWindow.once('ready-to-show', () => {
+    appLog.info('Main window ready to show');
     mainWindow.show();
+    appLog.info('Main window shown');
     
     // Windows: 如果缺少 VC++ Redistributable，显示友好提示
     if (process.platform === 'win32' && global.vcRedistMissing) {
+      appLog.warn('VC++ Redistributable missing, showing warning dialog');
       setTimeout(() => {
         dialog.showMessageBox(mainWindow, {
           type: 'warning',
@@ -449,20 +666,24 @@ function createMainWindow() {
           cancelId: 1
         }).then(result => {
           if (result.response === 0) {
-            // 打开下载链接
+            appLog.info('User chose to download VC++ Redistributable');
             shell.openExternal('https://aka.ms/vs/17/release/vc_redist.x64.exe');
+          } else {
+            appLog.info('User chose to ignore VC++ Redistributable warning');
           }
         });
-      }, 1000); // 延迟1秒显示，避免遮挡启动画面
+      }, 1000);
     }
   });
 
   // 窗口关闭处理
   mainWindow.on('closed', () => {
+    appLog.info('Main window closed, stopping recording');
     stopRecording();
   });
 
   // 注册窗口到谱系追踪器
+  appLog.debug('Registering window to lineage tracker', { windowId: `win_${mainWindow.id}` });
   globalState.lineageTracker.registerWindow(`win_${mainWindow.id}`, {
     url: '',
     title: 'Sentinel Browser'
@@ -474,13 +695,21 @@ function createMainWindow() {
     lineage: []
   });
 
-  // 设置网络请求监听（主窗口也需要）
+  appLog.debug('Window registered', { 
+    windowId: mainWindow.id, 
+    totalWindows: globalState.windows.size 
+  });
+
+  // 修复：重新启用网络请求监听，api_traffic.jsonl 需要这些数据
   setupTabNetworkListeners(mainWindow);
 
   // 注入错误监控
   mainWindow.webContents.on('dom-ready', () => {
+    appLog.debug('DOM ready, injecting error monitoring');
     if (globalState.errorDetector) {
-      globalState.errorDetector.injectMonitoring(mainWindow.webContents);
+      globalState.errorDetector.injectMonitoring(mainWindow.webContents)
+        .then(() => appLog.debug('Error monitoring injected successfully'))
+        .catch(err => appLog.error('Failed to inject error monitoring', err));
     }
   });
 
@@ -489,37 +718,58 @@ function createMainWindow() {
     const levelNames = ['debug', 'log', 'warning', 'error'];
     const levelName = levelNames[level] || 'log';
     if (message.includes('[Sentinel]') || message.includes('[Sentinel Renderer]')) {
-      log.info('[Renderer Console]', message);
+      appLog.debug('[Renderer Console]', { level: levelName, message: message.substring(0, 200) });
     }
   });
+
+  timer.end({ windowId: mainWindow.id });
   
   // 处理 webview 的 ipc-message（点击事件等）
   mainWindow.webContents.on('ipc-message', (event, channel, ...args) => {
     const data = args[0];
 
+    appLog.trace('IPC message received', [channel], {
+      hasData: !!data,
+      isRecording: globalState.isRecording,
+      hasTask: !!globalState.currentTask,
+      isPaused: globalState.isPaused
+    });
+
     // DOM snapshot 事件由 renderer 处理，不再直接处理
     // renderer.js 会调用 window.sentinelAPI.saveDOMSnapshot，发送 dom-snapshot 消息
     if (channel === 'sentinel-dom-snapshot') {
-      // 忽略，由 renderer 处理
+      appLog.debug('DOM snapshot message ignored (handled by renderer)');
       return;
     }
 
-    if (!globalState.isRecording || !globalState.currentTask) return;
+    if (!globalState.isRecording || !globalState.currentTask) {
+      appLog.debug('Ignoring IPC message - not recording or no task', { channel });
+      return;
+    }
 
     // 检查是否处于暂停状态
     if (globalState.isPaused) {
+      appLog.debug('Ignoring IPC message - recording paused', { channel });
       return;
     }
 
     switch (channel) {
       case 'sentinel-click':
-        log.info('Webview click received:', data.selector, 'event.sender:', typeof event.sender, 'id:', event.sender?.id);
+        appLog.info('Click event received', {
+          selector: data.selector,
+          xpath: data.xpath,
+          tagName: data.tagName,
+          coordinates: data.coordinates,
+          url: data.url
+        });
 
         // 记录 click 事件（不再实时截图，改为记录 video_time，录制结束后从视频截取）
         {
           // 使用事件中的 timestamp，确保与 DOM snapshot 文件名一致
           const timestamp = data.timestamp || Date.now();
           const clickData = {
+            // 修复：传递 eventId，确保网络请求能关联到 click 事件
+            eventId: data.eventId,
             type: 'click',
             timestamp: timestamp,
             xpath: data.xpath,
@@ -530,6 +780,8 @@ function createMainWindow() {
             coordinates: data.coordinates,
             url: data.url,
             title: data.title,
+            // 从 preload 传递的 DOM 统计信息
+            domStats: data.domStats || null,
             // 生成 snapshot 文件名（用于后续从视频截取）
             snapshotFileName: `snapshot_${timestamp}.png`,
             snapshotPath: `previews/snapshots/snapshot_${timestamp}.png`,
@@ -548,6 +800,8 @@ function createMainWindow() {
         {
           const timestamp = data.timestamp || Date.now();
           recordUserAction({
+            // 修复：传递 eventId，确保网络请求能关联到 input 事件
+            eventId: data.eventId,
             type: 'input',
             timestamp: timestamp,
             xpath: data.xpath,
@@ -556,6 +810,8 @@ function createMainWindow() {
             inputType: data.inputType,
             value: data.value,
             url: data.url,
+            // 从 preload 传递的 DOM 统计信息
+            domStats: data.domStats || null,
             domSnapshotFileName: `snapshot_${timestamp}.json`,
             domSnapshotPath: `dom/snapshot_${timestamp}.json`
           });
@@ -568,6 +824,8 @@ function createMainWindow() {
         {
           const timestamp = data.timestamp || Date.now();
           recordUserAction({
+            // 修复：传递 eventId，确保网络请求能关联到 scroll-start 事件
+            eventId: data.eventId,
             type: 'scroll-start',
             timestamp: timestamp,
             scrollX: data.scrollX,
@@ -578,6 +836,8 @@ function createMainWindow() {
             scrollSequenceId: data.scrollSequenceId,
             triggerSource: data.triggerSource,
             url: data.url,
+            // 从 preload 传递的 DOM 统计信息
+            domStats: data.domStats || null,
             domSnapshotFileName: `snapshot_${timestamp}.json`,
             domSnapshotPath: `dom/snapshot_${timestamp}.json`
           });
@@ -587,7 +847,26 @@ function createMainWindow() {
       case 'sentinel-scroll':
         {
           const timestamp = data.timestamp || Date.now();
+
+          // 优化：对于滚动过程中的事件，减少 DOM 快照生成频率
+          // 只在滚动方向改变或超过最小间隔时才生成快照
+          const scrollSequenceId = data.scrollSequenceId;
+          const lastSnapshotTime = globalState.scrollSequenceSnapshots.get(scrollSequenceId) || 0;
+          const timeSinceLastSnapshot = timestamp - lastSnapshotTime;
+          const shouldTakeSnapshot = timeSinceLastSnapshot >= globalState.minDOMSnapshotInterval;
+
+          let domSnapshotFileName = null;
+          let domSnapshotPath = null;
+
+          if (shouldTakeSnapshot) {
+            domSnapshotFileName = `snapshot_${timestamp}.json`;
+            domSnapshotPath = `dom/snapshot_${timestamp}.json`;
+            globalState.scrollSequenceSnapshots.set(scrollSequenceId, timestamp);
+          }
+
           recordUserAction({
+            // 修复：传递 eventId，确保网络请求能关联到 scroll 事件
+            eventId: data.eventId,
             type: 'scroll',
             timestamp: timestamp,
             scrollX: data.scrollX,
@@ -598,11 +877,13 @@ function createMainWindow() {
             scrollDeltaY: data.scrollDeltaY,
             scrollDuration: data.scrollDuration,
             direction: data.direction,
-            scrollSequenceId: data.scrollSequenceId,
+            scrollSequenceId: scrollSequenceId,
             triggerSource: data.triggerSource,
             url: data.url,
-            domSnapshotFileName: `snapshot_${timestamp}.json`,
-            domSnapshotPath: `dom/snapshot_${timestamp}.json`
+            // 从 preload 传递的 DOM 统计信息
+            domStats: data.domStats || null,
+            domSnapshotFileName: domSnapshotFileName,
+            domSnapshotPath: domSnapshotPath
           });
           // DOM snapshot 由 renderer.js 触发，这里不再重复触发
         }
@@ -611,7 +892,14 @@ function createMainWindow() {
       case 'sentinel-scroll-end':
         {
           const timestamp = data.timestamp || Date.now();
+
+          // 滚动结束，清理序列记录
+          const scrollSequenceId = data.scrollSequenceId;
+          globalState.scrollSequenceSnapshots.delete(scrollSequenceId);
+
           recordUserAction({
+            // 修复：传递 eventId，确保网络请求能关联到 scroll-end 事件
+            eventId: data.eventId,
             type: 'scroll-end',
             timestamp: timestamp,
             scrollX: data.scrollX,
@@ -622,9 +910,11 @@ function createMainWindow() {
             scrollDeltaY: data.scrollDeltaY,
             scrollDuration: data.scrollDuration,
             direction: data.direction,
-            scrollSequenceId: data.scrollSequenceId,
+            scrollSequenceId: scrollSequenceId,
             directionChanged: data.directionChanged,
             url: data.url,
+            // 从 preload 传递的 DOM 统计信息
+            domStats: data.domStats || null,
             domSnapshotFileName: `snapshot_${timestamp}.json`,
             domSnapshotPath: `dom/snapshot_${timestamp}.json`
           });
@@ -725,24 +1015,92 @@ function createMainWindow() {
         }
         break;
 
-      case 'sentinel-page-loaded':
-        log.info('[Main] Webview page loaded received:', data.url, 'timestamp:', data.timestamp);
+      case 'sentinel-page-load-start':
+        log.info('[Main] Webview page load start received:', data.url, 'timestamp:', data.timestamp, 'eventId:', data.eventId);
         {
-          // 使用 webview 传来的原始时间戳（DOMContentLoaded 触发时间），而不是生成新的时间戳
-          // 这样才能准确反映页面开始加载的时间
+          // 页面加载开始事件 - 在 HTML 下载前创建，确保后续请求能关联
           const timestamp = data.timestamp || Date.now();
-          log.info('[Main] Recording page-load event, timestamp:', timestamp, 'startTime:', globalState.currentTask?.startTime);
+          log.info('[Main] Recording page-load-start event, timestamp:', timestamp, 'eventId:', data.eventId);
+          
+          // 使用 UnifiedEventManager 创建事件，确保 eventId 被正确记录
+          if (globalState.unifiedEventManager && data.eventId) {
+            globalState.unifiedEventManager.createEvent({
+              eventId: data.eventId,
+              type: 'page-load-start',
+              timestamp: timestamp,
+              url: data.url,
+              title: data.title,
+              navigationTiming: data.navigationTiming,
+              isLoading: true // 页面开始加载
+            });
+            // 立即刷新到磁盘，确保后续关联能找到
+            globalState.unifiedEventManager.flushEvent(data.eventId);
+          }
+          
+          // 同时记录到用户操作（向后兼容）
+          recordUserAction({
+            eventId: data.eventId,
+            type: 'page-load-start',
+            timestamp: timestamp,
+            url: data.url,
+            title: data.title,
+            navigationTiming: data.navigationTiming,
+            isLoading: true
+          });
+          log.info('[Main] Page-load-start event recorded, eventId:', data.eventId);
+        }
+        break;
+
+      case 'sentinel-page-load-complete':
+        log.info('[Main] Webview page load complete received:', data.url, 'timestamp:', data.timestamp, 'eventId:', data.eventId);
+        {
+          // 页面加载完成事件 - 使用与 page-load-start 相同的 eventId
+          const timestamp = data.timestamp || Date.now();
+          log.info('[Main] Recording page-load-complete event, timestamp:', timestamp, 'eventId:', data.eventId);
+          
+          // 关联到 page-load-start 事件（如果存在）
+          if (globalState.unifiedEventManager && data.eventId) {
+            globalState.unifiedEventManager.associateOperation(data.eventId, {
+              type: 'page-load-complete',
+              timestamp: timestamp,
+              navigationTiming: data.navigationTiming,
+              isLoading: false // 页面加载完成
+            });
+          }
+          
           // 只有第一次页面加载使用 snapshot_initial.json，后续使用 timestamp 文件名
           const isInitial = !globalState.initialSnapshotSaved;
           recordUserAction({
+            eventId: data.eventId,
+            type: 'page-load-complete',
+            timestamp: timestamp,
+            url: data.url,
+            title: data.title,
+            navigationTiming: data.navigationTiming,
+            isLoading: false,
+            domSnapshotFileName: isInitial ? 'snapshot_initial.json' : `snapshot_${timestamp}.json`,
+            domSnapshotPath: isInitial ? 'dom/snapshot_initial.json' : `dom/snapshot_${timestamp}.json`
+          });
+          log.info('[Main] Page-load-complete event recorded, isInitial:', isInitial, 'duration:', data.navigationTiming?.duration);
+        }
+        break;
+
+      // 保留旧版本兼容性
+      case 'sentinel-page-loaded':
+        log.info('[Main] Webview page loaded received (legacy):', data.url, 'timestamp:', data.timestamp, 'eventId:', data.eventId);
+        {
+          const timestamp = data.timestamp || Date.now();
+          const isInitial = !globalState.initialSnapshotSaved;
+          recordUserAction({
+            eventId: data.eventId,
             type: 'page-load',
             timestamp: timestamp,
             url: data.url,
             title: data.title,
+            isLoading: false,
             domSnapshotFileName: isInitial ? 'snapshot_initial.json' : `snapshot_${timestamp}.json`,
             domSnapshotPath: isInitial ? 'dom/snapshot_initial.json' : `dom/snapshot_${timestamp}.json`
           });
-          log.info('[Main] Page-load event recorded, isInitial:', isInitial);
         }
         break;
 
@@ -758,6 +1116,481 @@ function createMainWindow() {
             // 注意：navigation 事件不关联 DOM snapshot，只在 page-loaded 事件关联
           });
         }
+        break;
+
+      // ========== 新增的事件类型处理 ==========
+
+      case 'sentinel-event-context':
+        // 事件上下文（由 CausalChainTracker 发送）
+        {
+          if (globalState.unifiedEventManager) {
+            globalState.unifiedEventManager.createEvent({
+              eventId: data.eventId,
+              type: data.eventType,
+              timestamp: data.timestamp,
+              url: data.url,
+              title: data.title,
+              ...data.metadata
+            });
+          }
+        }
+        break;
+
+      case 'sentinel-request-start':
+      case 'sentinel-request-complete':
+        // 请求开始/完成（由 CausalChainTracker 发送）
+        {
+          // 诊断日志：记录所有请求
+          log.info('[Main] Request received:', {
+            channel: channel,
+            type: data.type,
+            url: data.url,
+            method: data.method,
+            requestId: data.requestId,
+            eventId: data.eventId,
+            status: data.status,
+            hasUnifiedEventManager: !!globalState.unifiedEventManager
+          });
+          
+          // 诊断日志：记录 eventId 为 null 的请求
+          if (!data.eventId) {
+            log.warn('[Main] Request with null eventId:', {
+              type: data.type,
+              url: data.url,
+              method: data.method,
+              requestId: data.requestId,
+              recovered: data.recoveredEventId
+            });
+          }
+          
+          if (globalState.unifiedEventManager) {
+            const result = globalState.unifiedEventManager.associateRequest(data.eventId, {
+              requestId: data.requestId,
+              type: data.type,
+              url: data.url,
+              method: data.method,
+              status: data.status,
+              duration: data.duration,
+              body: data.body,
+              responseBody: data.responseBody,
+              recoveredEventId: data.recoveredEventId
+            });
+            log.info('[Main] Request association result:', { 
+              requestId: data.requestId, 
+              result: result,
+              eventId: data.eventId 
+            });
+          } else {
+            log.error('[Main] UnifiedEventManager not available for request association');
+          }
+        }
+        break;
+
+      case 'sentinel-eventid-null-diagnostic':
+        // EventId 为 null 的诊断信息
+        {
+          log.warn('[Main] EventId null diagnostic:', {
+            scenario: data.scenario,
+            url: data.url,
+            method: data.method,
+            hasAsyncContext: data.hasAsyncContext,
+            currentEventId: data.currentEventId,
+            pageUrl: data.pageUrl
+          });
+        }
+        break;
+
+      case 'sentinel-eventid-stats':
+        // EventId 统计信息（每30秒上报一次）
+        {
+          log.info('[Main] EventId null statistics:', {
+            summary: data.summary,
+            topScenarios: data.topScenarios,
+            topNullUrls: data.topNullUrls
+          });
+        }
+        break;
+
+      case 'sentinel-websocket-created':
+      case 'sentinel-websocket-message':
+        // WebSocket 事件
+        {
+          if (globalState.unifiedEventManager) {
+            globalState.unifiedEventManager.associateRequest(data.eventId, {
+              type: 'websocket',
+              wsId: data.wsId,
+              direction: data.direction,
+              data: data.data,
+              timestamp: data.timestamp
+            });
+          }
+        }
+        break;
+
+      case 'sentinel-sse-created':
+      case 'sentinel-sse-message':
+        // SSE 事件
+        {
+          if (globalState.unifiedEventManager) {
+            globalState.unifiedEventManager.associateRequest(data.eventId, {
+              type: 'sse',
+              esId: data.esId,
+              data: data.data,
+              timestamp: data.timestamp
+            });
+          }
+        }
+        break;
+
+      case 'sentinel-beacon':
+        // Beacon API
+        {
+          if (globalState.unifiedEventManager) {
+            globalState.unifiedEventManager.associateRequest(data.eventId, {
+              type: 'beacon',
+              beaconId: data.beaconId,
+              url: data.url,
+              data: data.data,
+              timestamp: data.timestamp
+            });
+          }
+        }
+        break;
+
+      case 'sentinel-postmessage':
+      case 'sentinel-postmessage-received':
+        // PostMessage - 匹配 preload 发送的格式
+        {
+          if (globalState.unifiedEventManager) {
+            globalState.unifiedEventManager.associateCommunication(data.eventId, {
+              type: 'postMessage',
+              direction: data.direction || 'sent',
+              message: data.message,
+              origin: data.targetOrigin || data.origin || '*',
+              timestamp: data.timestamp
+            });
+          }
+        }
+        break;
+
+      case 'sentinel-broadcastchannel':
+      case 'sentinel-broadcastchannel-created':
+      case 'sentinel-broadcastchannel-message':
+        // BroadcastChannel - 匹配 preload 发送的格式
+        {
+          if (globalState.unifiedEventManager) {
+            globalState.unifiedEventManager.associateCommunication(data.eventId, {
+              type: 'broadcastChannel',
+              channelId: data.bcId || data.channelId,
+              name: data.name,
+              direction: data.direction || 'sent',
+              message: data.message,
+              timestamp: data.timestamp
+            });
+          }
+        }
+        break;
+
+      case 'sentinel-storage':
+      case 'sentinel-storage-operation':
+        // Storage 操作 - 匹配 preload 发送的格式
+        {
+          if (globalState.unifiedEventManager) {
+            // preload 发送的 type 已经是 'localStorage' 或 'sessionStorage'
+            globalState.unifiedEventManager.associateStorageOperation(data.eventId, {
+              type: data.type,
+              operation: data.action || data.operation,
+              key: data.key,
+              value: data.value,
+              timestamp: data.timestamp
+            });
+          }
+        }
+        break;
+
+      case 'sentinel-indexeddb':
+      case 'sentinel-indexeddb-operation':
+        // IndexedDB 操作 - 匹配 preload 发送的格式
+        {
+          if (globalState.unifiedEventManager) {
+            globalState.unifiedEventManager.associateStorageOperation(data.eventId, {
+              type: 'indexedDB',
+              dbId: data.dbId,
+              dbName: data.name || data.dbName,
+              operation: data.action || data.operation,
+              version: data.version,
+              timestamp: data.timestamp
+            });
+          }
+        }
+        break;
+
+      case 'sentinel-cache':
+      case 'sentinel-cache-operation':
+        // Cache API 操作 - 匹配 preload 发送的格式
+        {
+          if (globalState.unifiedEventManager) {
+            globalState.unifiedEventManager.associateStorageOperation(data.eventId, {
+              type: 'cache',
+              cacheId: data.cacheId,
+              cacheName: data.cacheName,
+              operation: data.action || data.operation,
+              url: data.url,
+              timestamp: data.timestamp
+            });
+          }
+        }
+        break;
+
+      case 'sentinel-composition':
+        // Composition 事件（输入法）
+        {
+          if (globalState.unifiedEventManager) {
+            globalState.unifiedEventManager.associateComposition(data.eventId, {
+              type: data.type,
+              target: data.target,
+              xpath: data.xpath,
+              data: data.data,
+              timestamp: data.timestamp
+            });
+          }
+        }
+        break;
+
+      case 'sentinel-media-event':
+        // Media 播放事件
+        {
+          if (globalState.unifiedEventManager) {
+            globalState.unifiedEventManager.associateOperation(data.eventId, {
+              type: 'media',
+              mediaType: data.mediaType,
+              eventType: data.type,
+              src: data.src,
+              currentTime: data.currentTime,
+              duration: data.duration,
+              volume: data.volume,
+              playbackRate: data.playbackRate,
+              timestamp: data.timestamp
+            });
+          }
+        }
+        break;
+
+      case 'sentinel-form-submit':
+        // Form 提交
+        {
+          if (globalState.unifiedEventManager) {
+            globalState.unifiedEventManager.associateFormSubmit(data.eventId, {
+              action: data.action,
+              method: data.method,
+              enctype: data.enctype,
+              data: data.data,
+              timestamp: data.timestamp
+            });
+          }
+        }
+        break;
+
+      case 'sentinel-pointer-event':
+        // Pointer 事件
+        {
+          if (globalState.unifiedEventManager) {
+            globalState.unifiedEventManager.associatePointerEvent(data.eventId, {
+              type: data.type,
+              pointerId: data.pointerId,
+              pointerType: data.pointerType,
+              x: data.x,
+              y: data.y,
+              pressure: data.pressure,
+              tiltX: data.tiltX,
+              tiltY: data.tiltY,
+              target: data.target,
+              timestamp: data.timestamp
+            });
+          }
+        }
+        break;
+
+      case 'sentinel-touch-event':
+        // Touch 事件
+        {
+          if (globalState.unifiedEventManager) {
+            globalState.unifiedEventManager.associateTouchEvent(data.eventId, {
+              type: data.type,
+              touches: data.touches,
+              target: data.target,
+              timestamp: data.timestamp
+            });
+          }
+        }
+        break;
+
+      case 'sentinel-visibility-change':
+      case 'sentinel-before-unload':
+      case 'sentinel-resize':
+        // Lifecycle 事件
+        {
+          if (globalState.unifiedEventManager) {
+            globalState.unifiedEventManager.associateLifecycleEvent(data.eventId, {
+              type: data.type,
+              hidden: data.hidden,
+              visibilityState: data.visibilityState,
+              width: data.width,
+              height: data.height,
+              url: data.url,
+              timestamp: data.timestamp
+            });
+          }
+        }
+        break;
+
+      case 'sentinel-csp-violation':
+        // CSP 违规
+        {
+          if (globalState.unifiedEventManager) {
+            globalState.unifiedEventManager.associateSecurityEvent(data.eventId, {
+              type: 'csp',
+              blockedURI: data.blockedURI,
+              violatedDirective: data.violatedDirective,
+              originalPolicy: data.originalPolicy,
+              documentURI: data.documentURI,
+              timestamp: data.timestamp
+            });
+          }
+        }
+        break;
+
+      case 'sentinel-css-animation':
+      case 'sentinel-css-transition':
+        // CSS Animation/Transition
+        {
+          if (globalState.unifiedEventManager) {
+            globalState.unifiedEventManager.associateCSSAnimation(data.eventId, {
+              type: data.type,
+              animationName: data.animationName,
+              propertyName: data.propertyName,
+              target: data.target,
+              timestamp: data.timestamp
+            });
+          }
+        }
+        break;
+
+      case 'sentinel-performance':
+      case 'sentinel-performance-entry':
+        // Performance 指标 - 匹配 preload 发送的格式
+        {
+          if (globalState.unifiedEventManager) {
+            globalState.unifiedEventManager.associateOperation(data.eventId, {
+              type: 'performance',
+              entryType: data.entryType || data.type,
+              name: data.name,
+              startTime: data.startTime,
+              duration: data.duration,
+              timestamp: data.timestamp
+            });
+          }
+        }
+        break;
+
+      case 'sentinel-clipboard':
+      case 'sentinel-clipboard-operation':
+        // Clipboard 操作 - 匹配 preload 发送的格式
+        {
+          if (globalState.unifiedEventManager) {
+            globalState.unifiedEventManager.associateOperation(data.eventId, {
+              type: 'clipboard',
+              operation: data.action || data.operation,
+              text: data.text,
+              timestamp: data.timestamp
+            });
+          }
+        }
+        break;
+
+      case 'sentinel-iframe-injected':
+        // iframe 注入成功
+        {
+          log.info('Iframe preload injected:', data.src);
+        }
+        break;
+
+      case 'sentinel-sw-registered':
+        // Service Worker 注册成功
+        {
+          log.info('Service Worker registered:', data.scope);
+        }
+        break;
+
+      case 'sentinel-sw-request':
+        // Service Worker 拦截的请求
+        {
+          if (globalState.unifiedEventManager) {
+            globalState.unifiedEventManager.associateRequest(data.eventId || 'unknown', {
+              type: 'fetch',
+              url: data.url,
+              method: data.method,
+              source: 'service-worker',
+              timestamp: data.timestamp
+            });
+          }
+        }
+        break;
+
+      case 'report-error':
+        // 错误报告
+        {
+          log.debug('Error report from renderer:', data);
+          // 错误事件已经通过 error-detector 处理，这里只需要记录
+        }
+        break;
+
+      case 'dom-snapshot':
+        // DOM 快照
+        {
+          log.debug('DOM snapshot received:', data.type);
+          // DOM 快照已经通过 saveDOMSnapshot 处理
+        }
+        break;
+
+      case 'user-action':
+        // 用户操作
+        {
+          log.debug('User action received:', data.type);
+          // 用户操作已经通过其他事件处理
+        }
+        break;
+
+      case 'sentinel-console-log':
+        // 控制台日志（错误、警告等）
+        {
+          if (globalState.consoleErrorStream && data.level === 'error') {
+            const errorEntry = {
+              timestamp: data.timestamp || Date.now(),
+              level: data.level,
+              message: data.message,
+              url: data.url,
+              source: data.source,
+              line: data.line,
+              column: data.column
+            };
+            globalState.consoleErrorStream.write(JSON.stringify(errorEntry) + '\n');
+          }
+          // 同时关联到当前事件
+          if (globalState.unifiedEventManager && data.eventId) {
+            globalState.unifiedEventManager.associateOperation(data.eventId, {
+              type: 'console',
+              level: data.level,
+              message: data.message,
+              timestamp: data.timestamp
+            });
+          }
+        }
+        break;
+
+      default:
+        // 未知事件类型
+        log.debug('Unknown sentinel event:', channel, data);
         break;
 
     }
@@ -808,8 +1641,9 @@ function createTabWindow(url, parentId = null) {
     globalState.cdpManager.attach(tabWindow.webContents);
   }
 
-  // 设置网络请求监听（关键：新标签页需要独立的网络监听）
-  setupTabNetworkListeners(tabWindow);
+  // 网络请求监听已由 Preload 层的 CausalChainTracker 处理
+  // 不再使用 webRequest API（避免重复拦截和时间匹配的不准确性）
+  // setupTabNetworkListeners(tabWindow);
 
   // 注入错误监控
   tabWindow.webContents.on('dom-ready', () => {
@@ -962,6 +1796,57 @@ function setupWebviewIPCListeners(browserWindow) {
           });
         }
         break;
+
+      case 'sentinel-request-start':
+      case 'sentinel-request-complete':
+        // 请求开始/完成（由 CausalChainTracker 动态注入代码发送）
+        {
+          log.info('[Main] Request from webview:', {
+            channel: channel,
+            type: data.type,
+            url: data.url,
+            method: data.method,
+            requestId: data.requestId,
+            eventId: data.eventId,
+            status: data.status,
+            hasEventId: !!data.eventId
+          });
+
+          if (globalState.unifiedEventManager) {
+            const result = globalState.unifiedEventManager.associateRequest(data.eventId, {
+              requestId: data.requestId,
+              type: data.type,
+              url: data.url,
+              method: data.method,
+              status: data.status,
+              timestamp: data.timestamp
+            });
+            log.info('[Main] Request association result:', {
+              requestId: data.requestId,
+              result: result,
+              eventId: data.eventId,
+              url: data.url
+            });
+
+            // 诊断：如果关联失败，记录详细原因
+            if (!result) {
+              if (!data.eventId) {
+                log.warn('[Main] Request association failed: eventId is null. Request may have started before any user event.', {
+                  url: data.url,
+                  type: data.type
+                });
+              } else {
+                log.warn('[Main] Request association failed: event not found in memory. Event may have been written and cleaned up.', {
+                  eventId: data.eventId,
+                  url: data.url
+                });
+              }
+            }
+          } else {
+            log.error('[Main] UnifiedEventManager not available for request association');
+          }
+        }
+        break;
     }
   });
 }
@@ -1073,19 +1958,9 @@ function setupTabNetworkListeners(browserWindow) {
           body: responseBody,
           bodyPath: responseBodyPath
         });
-        
-        // 写入API流量日志
-        if (globalState.apiLogStream) {
-          const apiEntry = {
-            timestamp: timestamp,
-            url: url,
-            status: statusCode,
-            method: details.method,
-            resourceType: resourceType,
-            windowId: windowId
-          };
-          globalState.apiLogStream.write(JSON.stringify(apiEntry) + '\n');
-        }
+
+        // 注意：API流量日志现在由 UnifiedEventManager.associateRequest 统一写入
+        // webRequest.onCompleted 路径通过 UnifiedEventManager 关联请求，确保 eventId 正确记录
         
         // 将请求与对应的事件关联
         // 使用 Date.now() 作为统一的时间戳，避免 Chrome 时间戳和 JS 时间戳的偏差
@@ -1122,7 +1997,31 @@ function setupTabNetworkListeners(browserWindow) {
           }
         };
         
-        // 将请求加入缓冲队列，等待后续统一关联
+        // 首先尝试通过 UnifiedEventManager 关联请求（使用 eventId）
+        // 这是首选方案，符合重构的设计目标
+        if (globalState.unifiedEventManager) {
+          const requestId = `req_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
+          const result = globalState.unifiedEventManager.associateRequest(null, {
+            requestId: requestId,
+            type: resourceType === 'xhr' ? 'xhr' : 'fetch',
+            url: url,
+            method: details.method,
+            status: statusCode,
+            startTime: requestTimestamp,
+            endTime: requestEndTime,
+            duration: requestEndTime - requestTimestamp,
+            body: requestBody,
+            responseBody: responseBody
+          });
+
+          if (result) {
+            log.info('WebRequest associated via UnifiedEventManager:', url);
+          } else {
+            log.debug('WebRequest failed to associate via UnifiedEventManager, buffering:', url);
+          }
+        }
+
+        // 将请求加入缓冲队列，作为备用关联方案
         // 实际关联由 post-process-correlation.js 脚本在录制结束后完成
         requestBuffer.push(apiRequest);
         log.debug('WebRequest buffered:', url, 'timestamp:', requestTimestamp, 'hasBody:', !!requestBody);
@@ -1214,16 +2113,18 @@ function setupTabNetworkListeners(browserWindow) {
         // 只有在录制中且未暂停时才记录
         if (globalState.isRecording && globalState.currentTask && !globalState.isPaused) {
           // 记录文件事件
-          const fileEvent = globalState.dataSchemaManager.generateFileIOEvent('preview', {
-            fileName: path.basename(details.url),
-            mimeType: matchedPattern.mimeType,
+          globalState.unifiedEventManager.createAndFlushEvent({
+            type: 'file_io',
+            fileType: 'preview',
+            url: details.url,
+            windowId: windowId,
             localPath: null,
             contentSummary: `${matchedPattern.type.toUpperCase()} detected: ${details.url}`,
-            windowId: windowId,
-            url: details.url
+            metadata: {
+              fileName: path.basename(details.url),
+              mimeType: matchedPattern.mimeType
+            }
           });
-
-          appendToManifest(fileEvent);
         }
       }
     }
@@ -1265,17 +2166,19 @@ function setupDownloadHandler(browserWindow) {
       const filePath = path.join(downloadsDir, fileName);
       item.setSavePath(filePath);
       
-      // 记录下载事件 - 使用完整Schema
-      const downloadEvent = globalState.dataSchemaManager.generateFileIOEvent('download', {
-        fileName: fileName,
-        fileSize: totalBytes,
-        mimeType: item.getMimeType(),
-        localPath: path.join('downloads', fileName),
+      // 记录下载事件 - 使用统一事件格式
+      globalState.unifiedEventManager.createAndFlushEvent({
+        type: 'file_io',
+        fileType: 'download',
+        url: item.getURL(),
         windowId: `win_${browserWindow.id}`,
-        url: item.getURL()
+        localPath: path.join('downloads', fileName),
+        metadata: {
+          fileName: fileName,
+          fileSize: totalBytes,
+          mimeType: item.getMimeType()
+        }
       });
-      
-      appendToManifest(downloadEvent);
       
       item.once('done', (event, state) => {
         if (state === 'completed') {
@@ -1352,6 +2255,142 @@ function getFreeSpace(directory) {
   }
 }
 
+// 生成 readme.md 内容
+function generateReadmeContent(taskConfig, taskId, taskDirName) {
+  const now = new Date().toISOString();
+  const options = taskConfig.options || {};
+  
+  return `# Task 录制数据说明
+
+## 任务基本信息
+
+- **任务ID**: ${taskDirName}
+- **目标网站**: ${taskConfig.url || '未指定'}
+- **录制时间**: ${now}
+- **操作员**: ${taskConfig.userId || taskConfig.operator || process.env.USER || 'anonymous'}
+- **任务类型**: 网页浏览与交互录制
+
+## 录制配置
+
+- **录制视频**: ${options.recordVideo ? '✅ 启用' : '❌ 禁用'}
+- **捕获 DOM**: ${options.captureDOM ? '✅ 启用' : '❌ 禁用'}
+- **捕获 API**: ${options.captureAPI ? '✅ 启用' : '❌ 禁用'}
+- **捕获状态**: ${options.captureState ? '✅ 启用' : '❌ 禁用'}
+- **生成截图**: ${options.captureScreenshots ? '✅ 启用' : '❌ 禁用'}
+
+## 目录结构说明
+
+\`\`\`
+${taskDirName}/
+├── training_manifest.jsonl    # 核心事件日志文件（黄金数据）
+├── metadata.json              # 任务元数据
+├── task_config.json           # 任务配置
+├── readme.md                  # 本说明文件
+├── video/                     # 录制视频文件
+│   └── recording.mp4          # 屏幕录制视频
+├── dom/                       # DOM 快照文件
+│   ├── rrweb_events.json      # rrweb 格式 DOM 事件序列
+│   └── snapshot_*.json        # 各时间点的 DOM 快照
+├── network/                   # 网络数据
+│   ├── resources/             # 静态资源文件（JS/CSS/图片等）
+│   ├── api_responses.json     # API 响应数据
+│   ├── api_traffic.jsonl      # API 流量日志
+│   └── request_correlation.jsonl  # 请求关联日志
+├── downloads/                 # 下载文件（PDF/文档等）
+├── uploads/                   # 上传文件
+├── previews/                  # 预览截图
+│   └── snapshots/             # 页面截图（如启用截图功能）
+├── sandbox/                   # 浏览器状态数据
+│   └── lineage.json           # 事件血缘关系
+└── logs/                      # 日志文件
+    └── errors.json            # 错误日志
+\`\`\`
+
+## 数据文件详细说明
+
+### 1. training_manifest.jsonl（核心文件）
+
+**作用**: 记录所有用户操作、页面状态、网络请求等事件的完整信息
+
+**内容**: 
+- 用户操作事件（click、scroll、input 等）
+- 页面加载事件（page-load-start、page-load-complete）
+- 网络请求数据（XHR、fetch、WebSocket 等）
+- 页面状态信息（fingerprint、DOM 统计等）
+- 事件血缘关系（previous_event_id、next_event_id）
+
+**使用场景**:
+- 页面自动化测试脚本生成
+- 用户行为分析与产品迭代
+- 页面功能问答知识库建设
+- 操作流程回放与验证
+
+### 2. dom/ 目录
+
+**rrweb_events.json**: 
+- rrweb 格式的 DOM 变更序列
+- 用于完整回放页面变化过程
+
+**snapshot_*.json**:
+- 特定时间点的完整 DOM 快照
+- 与 training_manifest.jsonl 中的事件通过时间戳关联
+- 用于分析特定操作时的页面状态
+
+### 3. network/ 目录
+
+**resources/**:
+- 页面加载的静态资源（JS、CSS、图片、字体等）
+- 用于离线分析页面依赖
+
+**api_responses.json**:
+- API 接口的响应数据
+- 用于分析前后端交互
+
+**api_traffic.jsonl**:
+- API 请求流量日志
+- 用于性能分析和接口监控
+
+### 4. video/ 目录
+
+**recording.mp4**:
+- 屏幕录制视频
+- 用于人工审核和可视化回放
+
+## 数据使用建议
+
+### 1. 页面产品迭代
+- 分析 \`training_manifest.jsonl\` 中的用户操作路径
+- 查看 \`dom/\` 目录下的 DOM 快照了解页面结构
+- 结合 \`network/resources/\` 分析页面资源加载
+
+### 2. 页面自动化测试
+- 基于 \`training_manifest.jsonl\` 生成测试脚本
+- 使用 \`domSnapshotPath\` 关联的 DOM 快照进行断言
+- 参考 \`network/api_responses.json\` 模拟接口响应
+
+### 3. 页面功能问答
+- 提取 \`training_manifest.jsonl\` 中的操作序列作为知识库
+- 结合 DOM 快照说明功能点的页面位置
+- 使用视频文件进行可视化说明
+
+### 4. 页面知识库建设
+- 整理页面加载的静态资源清单
+- 记录 API 接口的调用关系
+- 建立事件血缘关系图谱
+
+## 技术说明
+
+- **录制工具**: sentinel-browser (基于 Electron)
+- **DOM 序列化**: rrweb 标准
+- **数据格式**: JSON Lines (JSONL)
+- **视频编码**: H.264
+
+---
+
+*Generated by Sentinel Browser Recording System*
+`;
+}
+
 // 开始录制
 async function startRecording(taskConfig = {}) {
   if (globalState.isRecording) {
@@ -1375,6 +2414,17 @@ async function startRecording(taskConfig = {}) {
   const timestamp = Date.now();
   // 如果提供了 id，直接使用；否则生成新的 task_id
   const taskId = taskConfig.id || `task_${timestamp}`;
+
+  // 将 taskId 添加到 taskConfig，以便 UnifiedEventManager 可以访问
+  taskConfig.id = taskId;
+  taskConfig.taskId = taskId;
+
+  // 添加用户信息的默认值（如果未提供）
+  taskConfig.userId = taskConfig.userId || taskConfig.operator || process.env.USER || 'anonymous';
+  taskConfig.role = taskConfig.role || 'operator';
+  taskConfig.permissions = taskConfig.permissions || ['record', 'playback'];
+  taskConfig.subTaskId = taskConfig.subTaskId || null;
+  taskConfig.env = taskConfig.env || { platform: process.platform };
 
   // 构建友好的目录名：task_{任务名称}_{网页地址}_{taskId}
   // 清理任务名称和URL，移除非法字符
@@ -1404,6 +2454,11 @@ async function startRecording(taskConfig = {}) {
     fs.mkdirSync(path.join(taskDir, 'downloads'), { recursive: true });
     fs.mkdirSync(path.join(taskDir, 'uploads'), { recursive: true });
     log.info('Task directories created successfully');
+    
+    // 创建 readme.md 文件
+    const readmeContent = generateReadmeContent(taskConfig, taskId, taskDirName);
+    fs.writeFileSync(path.join(taskDir, 'readme.md'), readmeContent);
+    log.info('readme.md created successfully');
   } catch (mkdirError) {
     log.error('Failed to create task directories:', mkdirError);
     log.error('Error code:', mkdirError.code);
@@ -1427,6 +2482,11 @@ async function startRecording(taskConfig = {}) {
   
   // 重置初始 DOM snapshot 标志，确保新任务开始时能正确保存初始快照
   globalState.initialSnapshotSaved = false;
+
+  // 重置 pendingEvents 和 flushedEvents（确保新任务开始时状态正确）
+  globalState.pendingEvents = [];
+  globalState.flushedEvents = new Map();
+  log.info('[startRecording] Reset pendingEvents and flushedEvents');
 
   // 清空动态资源列表
   clearDynamicResources();
@@ -1462,6 +2522,22 @@ async function startRecording(taskConfig = {}) {
   const consoleErrorPath = path.join(taskDir, 'logs', 'console_errors.jsonl');
   globalState.consoleErrorStream = fs.createWriteStream(consoleErrorPath, { flags: 'a' });
 
+  // 初始化统一事件管理器（基于因果关系链）
+  globalState.unifiedEventManager = new UnifiedEventManager({
+    maxCacheSize: 10000,      // 最大缓存1万个事件
+    maxRetries: 3,            // 写入重试3次
+    retryDelay: 100,          // 重试延迟100ms
+    onMaxCacheReached: () => {
+      // 自动结束录制（缓存达到1万事件）
+      log.error('[startRecording] Max event cache reached (10000), auto-stopping recording');
+      stopRecording().catch(err => {
+        log.error('[startRecording] Failed to auto-stop recording:', err);
+      });
+    }
+  });
+  globalState.unifiedEventManager.initialize(taskDir, globalState.manifestStream, globalState.correlationLogStream, globalState.apiLogStream, taskConfig);
+  log.info('[startRecording] UnifiedEventManager initialized with maxCacheSize: 10000');
+
   // 创建 metadata.json
   const metadata = {
     task_id: taskId,
@@ -1490,12 +2566,19 @@ async function startRecording(taskConfig = {}) {
 
   // 记录任务开始事件
   log.info('[startRecording] Generating task_start event...');
-  const startEvent = globalState.dataSchemaManager.generateUserContextEvent({
-    type: 'task_start',
-    description: `Task started: ${taskConfig.name || taskId}`
+  const startEvent = globalState.unifiedEventManager.createAndFlushEvent({
+    type: 'user_context',
+    contextType: 'task_start',
+    description: `Task started: ${taskConfig.name || taskId}`,
+    semanticLabel: `Task started: ${taskConfig.name || taskId}`,
+    taskId: taskId,
+    subTaskId: taskConfig.subTaskId || null,
+    userId: taskConfig.userId || null,
+    role: taskConfig.role || null,
+    permissions: taskConfig.permissions || [],
+    env: taskConfig.env || null
   });
-  log.info('[startRecording] Task start event generated:', startEvent?.event_details?.action, 'timestamp:', startEvent?.timestamp, 'video_time:', startEvent?.video_time);
-  appendToManifest(startEvent);
+  log.info('[startRecording] Task start event generated:', startEvent?.type, 'timestamp:', startEvent?.timestamp, 'video_time:', startEvent?.video_time);
   log.info('[startRecording] Task start event appended to manifest');
 
   // 视频录制现在在 renderer 进程中完成
@@ -1504,6 +2587,10 @@ async function startRecording(taskConfig = {}) {
 
   // Watchdog 已禁用，避免启动警告
   // globalState.watchdogManager.start();
+
+  // 修复：启动录制时重置活动时间，避免立即触发无活动停止
+  updateActivityTime();
+  log.info('[startRecording] Activity time reset');
 
   // 启动非活动监控
   startInactivityWatchdog();
@@ -1527,10 +2614,29 @@ async function stopRecording() {
     return;
   }
 
+  // 修复：在关闭流之前先记录 task_stop 事件
+  // 保存任务数据（在关闭流之前）
+  if (globalState.currentTask) {
+    // 记录任务结束事件（必须在关闭 manifestStream 之前）
+    if (globalState.unifiedEventManager) {
+      globalState.unifiedEventManager.createAndFlushEvent({
+        type: 'user_context',
+        contextType: 'task_stop',
+        description: `Task stopped: ${globalState.currentTask.id}`,
+        semanticLabel: `Task stopped: ${globalState.currentTask.id}`
+      });
+      log.info('[stopRecording] Task stop event appended to manifest');
+    }
+  }
+
   globalState.isRecording = false;
 
   // 清空已下载的 PDF 集合
   globalState.downloadedPdfs.clear();
+
+  // 清空 DOM 快照序列记录
+  globalState.scrollSequenceSnapshots.clear();
+  globalState.lastDOMSnapshotTime = 0;
 
   // 视频录制在 renderer 进程中完成，主进程不需要停止录制
   log.info('Video recording stopped by renderer process');
@@ -1542,6 +2648,18 @@ async function stopRecording() {
   if (globalState.inactivityTimer) {
     clearTimeout(globalState.inactivityTimer);
     globalState.inactivityTimer = null;
+  }
+
+  // 停止 EventAssociationManager（确保所有数据写入）
+  if (globalState.associationManager) {
+    await globalState.associationManager.stop();
+    globalState.associationManager = null;
+  }
+
+  // 修复：停止 UnifiedEventManager，确保 regenerateManifest 被执行
+  if (globalState.unifiedEventManager) {
+    await globalState.unifiedEventManager.stop();
+    globalState.unifiedEventManager = null;
   }
 
   // 关闭 training_manifest.jsonl 流
@@ -1568,16 +2686,8 @@ async function stopRecording() {
     globalState.consoleErrorStream = null;
   }
 
-  // 保存任务数据
+  // 保存任务数据（其他文件）
   if (globalState.currentTask) {
-    // 记录任务结束事件
-    if (globalState.dataSchemaManager) {
-      const stopEvent = globalState.dataSchemaManager.generateUserContextEvent({
-        type: 'task_stop',
-        description: `Task stopped: ${globalState.currentTask.id}`
-      });
-      appendToManifest(stopEvent);
-    }
 
     // 保存API响应到 network 目录
     const apiResponsesDir = path.join(globalState.currentTask.dir, 'network');
@@ -1614,14 +2724,20 @@ async function stopRecording() {
             
             // 保存浏览器状态关联到 correlation log（关联到 task_stop 事件）
             const stopEventTimestamp = Date.now();
-            saveCorrelationLog(stopEventTimestamp, {
+            const browserStateData = {
               url: state.url,
               title: state.title,
               localStorageKeys: Object.keys(state.localStorage || {}),
               sessionStorageKeys: Object.keys(state.sessionStorage || {}),
               cookieCount: (state.cookies || []).length,
               indexedDBDatabases: Object.keys(state.indexedDB || {})
-            }, 'browser_state');
+            };
+            
+            if (globalState.associationManager) {
+              globalState.associationManager.writeCorrelationLog(stopEventTimestamp, 'browser_state', browserStateData);
+            } else {
+              saveCorrelationLog(stopEventTimestamp, browserStateData, 'browser_state');
+            }
           }
         }
       } catch (error) {
@@ -1822,8 +2938,11 @@ async function extractSnapshotsFromVideo(taskDir, videoPath) {
     try {
       const event = JSON.parse(line);
 
-      // 只处理有 snapshotFileName 的事件
-      if (event._metadata?.snapshotFileName) {
+      // 修复：支持新旧两种格式的 snapshotFileName
+      // 旧格式: event._metadata.snapshotFileName
+      // 新格式: event.metadata.snapshotFileName
+      const snapshotFileName = event._metadata?.snapshotFileName || event.metadata?.snapshotFileName;
+      if (snapshotFileName) {
         // 从 video_time 计算时间（秒）
         // video_time 格式通常是 "HH:MM:SS.mmm" 或毫秒数
         let timeInSeconds = 0;
@@ -1847,7 +2966,7 @@ async function extractSnapshotsFromVideo(taskDir, videoPath) {
           timeInSeconds = (event.timestamp - globalState.currentTask.startTime) / 1000;
         }
 
-        const outputPath = path.join(snapshotsDir, event._metadata.snapshotFileName);
+        const outputPath = path.join(snapshotsDir, snapshotFileName);
 
         // 检查是否已存在（避免重复截取）
         if (!fs.existsSync(outputPath)) {
@@ -1975,6 +3094,49 @@ async function extractSnapshotsFromVideo(taskDir, videoPath) {
   }
 }
 
+// 获取当前事件上下文信息（用于填充事件字段）
+function getCurrentEventContext() {
+  if (!globalState.currentTask) {
+    return {
+      taskId: null,
+      subTaskId: null,
+      userId: null,
+      role: null,
+      permissions: [],
+      env: null,
+      windowId: null,
+      url: null
+    };
+  }
+
+  const taskConfig = globalState.currentTask.config || {};
+  
+  // 获取当前活动窗口
+  let currentWindowId = null;
+  let currentUrl = null;
+  const focusedWindow = BrowserWindow.getFocusedWindow();
+  if (focusedWindow) {
+    currentWindowId = `win_${focusedWindow.id}`;
+    // 尝试获取URL
+    try {
+      focusedWindow.webContents.executeJavaScript('window.location.href').then(url => {
+        currentUrl = url;
+      }).catch(() => {});
+    } catch (e) {}
+  }
+
+  return {
+    taskId: globalState.currentTask.id,
+    subTaskId: taskConfig.subTaskId || null,
+    userId: taskConfig.userId || null,
+    role: taskConfig.role || null,
+    permissions: taskConfig.permissions || [],
+    env: taskConfig.env || null,
+    windowId: currentWindowId,
+    url: currentUrl
+  };
+}
+
 // 追加到manifest（原子写入）
 function appendToManifest(event) {
   if (!globalState.isRecording || !globalState.manifestStream) {
@@ -1983,9 +3145,6 @@ function appendToManifest(event) {
   }
 
   log.info('[appendToManifest] Appending event:', event.type || event.event_details?.action, 'timestamp:', event.timestamp);
-
-  // 先写入之前暂存的事件
-  flushPendingEvents();
 
   // 如果事件已经是完整Schema格式，直接使用
   // 否则需要包装成完整Schema格式
@@ -2054,20 +3213,17 @@ function appendToManifest(event) {
     }, 'lineage');
   }
 
+  // 直接写入文件 - 简化实现，确保事件被写入
   const line = JSON.stringify(fullEvent) + '\n';
   
-  // Windows: 使用同步写入确保事件立即保存
-  if (process.platform === 'win32') {
-    try {
-      const manifestPath = path.join(globalState.currentTask.dir, 'training_manifest.jsonl');
-      fs.appendFileSync(manifestPath, line);
-      log.info('[appendToManifest] Event written to disk (Windows sync):', event.type || event.event_details?.action);
-    } catch (err) {
-      log.error('[appendToManifest] Failed to write event (Windows):', err);
-      // 回退到流写入
-      globalState.manifestStream.write(line);
-    }
-  } else {
+  // 使用同步写入确保事件立即落盘
+  try {
+    const manifestPath = path.join(globalState.currentTask.dir, 'training_manifest.jsonl');
+    fs.appendFileSync(manifestPath, line);
+    log.info('[appendToManifest] Event written to disk:', event.type || event.event_details?.action, 'timestamp:', fullEvent.timestamp);
+  } catch (err) {
+    log.error('[appendToManifest] Failed to write event:', err);
+    // 回退到流写入
     globalState.manifestStream.write(line);
   }
 }
@@ -2100,6 +3256,33 @@ async function saveResource(url, resourceType, headers) {
 
     // 保存映射关系
     resourcePathMap.set(url, relativePath);
+
+    // 关联到最近的事件
+    const resourceTimestamp = Date.now();
+    const eventTimestamp = globalState.associationManager 
+      ? globalState.associationManager.findEventTimestamp(resourceTimestamp)
+      : findEventTimestampForRequest(resourceTimestamp);
+    
+    if (eventTimestamp) {
+      const resourceInfo = {
+        url: url,
+        path: relativePath,
+        timestamp: resourceTimestamp,
+        size: buffer.length,
+        resourceType: resourceType
+      };
+      
+      if (globalState.associationManager) {
+        globalState.associationManager.associate(
+          eventTimestamp, 
+          'static_resource', 
+          resourceInfo
+        );
+      } else {
+        updatePendingEventWithResource(eventTimestamp, resourceInfo);
+      }
+      log.info('Resource associated to event:', eventTimestamp, 'url:', url);
+    }
 
     log.debug(`Resource saved: ${safeFileName} (${resourceType})`);
     return relativePath;
@@ -2139,16 +3322,23 @@ function getExtensionByMimeType(headers) {
 // 写入暂存的事件到 manifest
 function flushPendingEvents() {
   if (!globalState.manifestStream) return;
-  
+
+  // 修复：添加 Array.isArray 检查，确保 pendingEvents 是数组
+  if (!Array.isArray(globalState.pendingEvents)) {
+    console.error('[flushPendingEvents] pendingEvents is not an array:', typeof globalState.pendingEvents, globalState.pendingEvents);
+    globalState.pendingEvents = [];
+    return;
+  }
+
   for (const event of globalState.pendingEvents) {
     const line = JSON.stringify(event) + '\n';
     globalState.manifestStream.write(line);
-    
+
     // 保存到已写入事件缓存，用于后续网络请求关联
     // 使用深拷贝，避免后续修改影响已写入文件的内容
     globalState.flushedEvents.set(event.timestamp, JSON.parse(JSON.stringify(event)));
   }
-  
+
   // 清理过旧的缓存事件（保留最近 60 秒）
   const cutoff = Date.now() - 60000;
   for (const [timestamp, event] of globalState.flushedEvents) {
@@ -2156,19 +3346,29 @@ function flushPendingEvents() {
       globalState.flushedEvents.delete(timestamp);
     }
   }
-  
+
   globalState.pendingEvents = [];
 }
 
 // 更新暂存事件，添加 API 请求
 function updatePendingEventWithApiRequest(eventTimestamp, apiRequest) {
+  // 修复：添加 Array.isArray 检查
+  if (!Array.isArray(globalState.pendingEvents)) {
+    console.error('[updatePendingEventWithApiRequest] pendingEvents is not an array:', typeof globalState.pendingEvents);
+    globalState.pendingEvents = [];
+  }
+
   // 在 pendingEvents 中查找
   const pendingEvent = globalState.pendingEvents.find(e => e.timestamp === eventTimestamp);
   if (pendingEvent) {
-    if (!pendingEvent.apiRequests) {
-      pendingEvent.apiRequests = [];
+    // 确保 network_correlation 和 api_requests 存在
+    if (!pendingEvent.network_correlation) {
+      pendingEvent.network_correlation = {};
     }
-    pendingEvent.apiRequests.push(apiRequest);
+    if (!pendingEvent.network_correlation.api_requests) {
+      pendingEvent.network_correlation.api_requests = [];
+    }
+    pendingEvent.network_correlation.api_requests.push(apiRequest);
     
     // 保存关联关系到日志文件（包含请求 body）
     saveCorrelationLog(eventTimestamp, {
@@ -2185,10 +3385,14 @@ function updatePendingEventWithApiRequest(eventTimestamp, apiRequest) {
   // 在已刷新的事件中查找并更新
   const flushedEvent = globalState.flushedEvents.get(eventTimestamp);
   if (flushedEvent) {
-    if (!flushedEvent.apiRequests) {
-      flushedEvent.apiRequests = [];
+    // 确保 network_correlation 和 api_requests 存在
+    if (!flushedEvent.network_correlation) {
+      flushedEvent.network_correlation = {};
     }
-    flushedEvent.apiRequests.push(apiRequest);
+    if (!flushedEvent.network_correlation.api_requests) {
+      flushedEvent.network_correlation.api_requests = [];
+    }
+    flushedEvent.network_correlation.api_requests.push(apiRequest);
     globalState.flushedEvents.set(eventTimestamp, flushedEvent);
     
     // 保存关联关系到日志文件（包含请求 body）
@@ -2204,17 +3408,96 @@ function updatePendingEventWithApiRequest(eventTimestamp, apiRequest) {
 }
 
 // 保存关联关系到日志文件
-function saveCorrelationLog(eventTimestamp, data, type = 'api_request') {
+function saveCorrelationLog(eventTimestamp, data, type = 'api_request', eventId = null) {
   if (!globalState.correlationLogStream) return;
-  
+
   const correlationRecord = {
     timestamp: Date.now(),
     type: type, // 'api_request', 'api_response', 'static_resource', 'dynamic_resource', 'lineage', 'browser_state'
     eventTimestamp: eventTimestamp,
+    eventId: eventId, // 添加 eventId 字段
     data: data
   };
-  
+
   globalState.correlationLogStream.write(JSON.stringify(correlationRecord) + '\n');
+}
+
+// 更新暂存事件，添加静态资源
+function updatePendingEventWithResource(eventTimestamp, resource) {
+  // 修复：添加 Array.isArray 检查
+  if (!Array.isArray(globalState.pendingEvents)) {
+    console.error('[updatePendingEventWithResource] pendingEvents is not an array:', typeof globalState.pendingEvents);
+    globalState.pendingEvents = [];
+  }
+
+  // 在 pendingEvents 中查找
+  const pendingEvent = globalState.pendingEvents.find(e => e.timestamp === eventTimestamp);
+  if (pendingEvent) {
+    // 确保 network_correlation 和 resources 存在
+    if (!pendingEvent.network_correlation) {
+      pendingEvent.network_correlation = {};
+    }
+    if (!pendingEvent.network_correlation.resources) {
+      pendingEvent.network_correlation.resources = [];
+    }
+    pendingEvent.network_correlation.resources.push(resource);
+    
+    // 保存关联关系到日志文件
+    saveCorrelationLog(eventTimestamp, {
+      url: resource.url,
+      path: resource.path,
+      timestamp: resource.timestamp,
+      size: resource.size
+    }, 'static_resource');
+    return;
+  }
+  
+  // 在已刷新的事件中查找并更新
+  const flushedEvent = globalState.flushedEvents.get(eventTimestamp);
+  if (flushedEvent) {
+    // 确保 network_correlation 和 resources 存在
+    if (!flushedEvent.network_correlation) {
+      flushedEvent.network_correlation = {};
+    }
+    if (!flushedEvent.network_correlation.resources) {
+      flushedEvent.network_correlation.resources = [];
+    }
+    flushedEvent.network_correlation.resources.push(resource);
+    globalState.flushedEvents.set(eventTimestamp, flushedEvent);
+    
+    // 保存关联关系到日志文件
+    saveCorrelationLog(eventTimestamp, {
+      url: resource.url,
+      path: resource.path,
+      timestamp: resource.timestamp,
+      size: resource.size
+    }, 'static_resource');
+  }
+}
+
+// 更新暂存事件，设置 response_status
+function updatePendingEventWithResponseStatus(eventTimestamp, responseStatus) {
+  // 在 pendingEvents 中查找
+  const pendingEvent = globalState.pendingEvents.find(e => e.timestamp === eventTimestamp);
+  if (pendingEvent) {
+    // 确保 network_correlation 存在
+    if (!pendingEvent.network_correlation) {
+      pendingEvent.network_correlation = {};
+    }
+    pendingEvent.network_correlation.response_status = responseStatus;
+    return;
+  }
+  
+  // 在已刷新的事件中查找并更新
+  const flushedEvent = globalState.flushedEvents.get(eventTimestamp);
+  if (flushedEvent) {
+    // 确保 network_correlation 存在
+    if (!flushedEvent.network_correlation) {
+      flushedEvent.network_correlation = {};
+    }
+    flushedEvent.network_correlation.response_status = responseStatus;
+    globalState.flushedEvents.set(eventTimestamp, flushedEvent);
+  }
 }
 
 // 缓冲 API 请求，等待后续关联
@@ -2235,21 +3518,17 @@ function bufferApiRequest(apiRequest) {
 }
 
 // 重新生成 training_manifest.jsonl 文件
-// 使用 flushedEvents 中的完整事件数据（包含后续关联的网络请求）
+// 注意：UnifiedEventManager 现在直接写入文件，此函数不再覆盖文件内容
 function regenerateManifestFile(taskDir) {
   try {
-    const manifestPath = path.join(taskDir, 'training_manifest.jsonl');
+    // 使用 EventAssociationManager 重新生成（如果可用）
+    if (globalState.associationManager) {
+      return globalState.associationManager.regenerateManifest();
+    }
     
-    // 按时间戳排序所有事件
-    const sortedEvents = Array.from(globalState.flushedEvents.entries())
-      .sort((a, b) => a[0] - b[0])
-      .map(([_, event]) => event);
-    
-    // 写入文件
-    const lines = sortedEvents.map(event => JSON.stringify(event)).join('\n') + '\n';
-    fs.writeFileSync(manifestPath, lines);
-    
-    log.info('Regenerated manifest file with', sortedEvents.length, 'events');
+    // 修复：不再使用 flushedEvents 重新生成文件，因为 UnifiedEventManager 已经直接写入
+    // 这避免了覆盖已写入的事件
+    log.info('Skipping manifest regeneration - UnifiedEventManager writes directly to file');
     return true;
   } catch (error) {
     log.error('Failed to regenerate manifest file:', error);
@@ -2258,8 +3537,8 @@ function regenerateManifestFile(taskDir) {
 }
 
 // 记录用户操作
-function recordUserAction(actionData) {
-  if (!globalState.isRecording || !globalState.manifestStream) {
+async function recordUserAction(actionData) {
+  if (!globalState.isRecording || !globalState.unifiedEventManager) {
     return;
   }
 
@@ -2268,95 +3547,56 @@ function recordUserAction(actionData) {
     return;
   }
 
-  // 使用 DataSchemaManager 生成完整格式的事件
-  if (globalState.dataSchemaManager) {
-    // 网络请求将通过 webRequest.onCompleted 异步关联到 pendingEvents 中的事件
-    // 这里先创建事件，不传递 apiRequests（初始为空数组）
-    log.info('Recording user action:', actionData.type, 'timestamp:', actionData.timestamp);
-    
-    // 使用增强版事件生成，包含页面指纹和用户意图
-    const fullEvent = globalState.dataSchemaManager.generateEnhancedUserActionEvent(actionData.type, {
-      semanticLabel: `${actionData.type} on ${actionData.selector || actionData.xpath || 'unknown element'}`,
-      domPath: actionData.xpath || actionData.selector,
-      shadowDomPath: actionData.shadowPath,
-      coordinates: actionData.coordinates,
-      windowId: actionData.windowId || 'win_1',
-      url: actionData.url,
-      title: actionData.title,
-      // DOM统计信息（如果可用）
-      domStats: actionData.domStats || {},
-      // 元素信息用于意图推断
-      text: actionData.text,
-      selector: actionData.selector,
-      inputType: actionData.inputType,
-      name: actionData.name,
-      key: actionData.key,
-      // 错误信息
-      hasErrors: actionData.hasErrors || false,
-      errorInfo: actionData.errorInfo || null,
-      apiRequests: [], // 初始为空，由 webRequest.onCompleted 异步填充
-      metadata: {
-        tagName: actionData.tagName,
-        text: actionData.text,
-        inputType: actionData.inputType,
-        value: actionData.value,
-        key: actionData.key,
-        // Scroll 基础字段
-        scrollX: actionData.scrollX,
-        scrollY: actionData.scrollY,
-        // Scroll 增强字段（用于记录完整的滚动信息）
-        scrollStartX: actionData.scrollStartX,
-        scrollStartY: actionData.scrollStartY,
-        scrollDeltaX: actionData.scrollDeltaX,
-        scrollDeltaY: actionData.scrollDeltaY,
-        scrollDuration: actionData.scrollDuration,
-        direction: actionData.direction,
-        scrollSequenceId: actionData.scrollSequenceId,
-        directionChanged: actionData.directionChanged,
-        triggerSource: actionData.triggerSource,
-        // 其他字段
-        title: actionData.title,
-        snapshotFileName: actionData.snapshotFileName,
-        snapshotPath: actionData.snapshotPath,
-        domSnapshotFileName: actionData.domSnapshotFileName,
-        domSnapshotPath: actionData.domSnapshotPath
-      }
-    });
-    
-    // 将事件暂存，等待网络请求完成后再写入
-    globalState.pendingEvents.push(fullEvent);
-    log.info('Event pending, waiting for network requests:', actionData.type, 'pending events:', globalState.pendingEvents.length);
-    
-    // 延迟写入，等待网络请求完成（2秒后，确保所有相关请求都已完成）
-    setTimeout(() => {
-      flushPendingEvents();
-    }, 2000);
-    
-    log.debug('User action recorded:', actionData.type);
-  } else {
-    // 降级处理：直接写入简单格式
-    const action = {
-      timestamp: actionData.timestamp || Date.now(),
-      type: actionData.type,
-      url: actionData.url,
+  log.info('Recording user action:', actionData.type, 'timestamp:', actionData.timestamp);
+
+  // 使用 UnifiedEventManager 创建事件（基于因果关系链）
+  const eventId = actionData.eventId || generateId('evt');
+  globalState.unifiedEventManager.createEvent({
+    eventId: eventId,
+    type: actionData.type,
+    timestamp: actionData.timestamp || Date.now(),
+    url: actionData.url,
+    title: actionData.title,
+    userAction: {
       xpath: actionData.xpath,
       selector: actionData.selector,
+      shadowPath: actionData.shadowPath,
       tagName: actionData.tagName,
       text: actionData.text,
       coordinates: actionData.coordinates,
       inputType: actionData.inputType,
       value: actionData.value,
       key: actionData.key,
-      code: actionData.code,
       scrollX: actionData.scrollX,
       scrollY: actionData.scrollY,
-      title: actionData.title,
-      changeCount: actionData.changeCount
-    };
+      scrollStartX: actionData.scrollStartX,
+      scrollStartY: actionData.scrollStartY,
+      scrollDeltaX: actionData.scrollDeltaX,
+      scrollDeltaY: actionData.scrollDeltaY,
+      scrollDuration: actionData.scrollDuration,
+      direction: actionData.direction,
+      scrollSequenceId: actionData.scrollSequenceId,
+      directionChanged: actionData.directionChanged,
+      triggerSource: actionData.triggerSource
+    },
+    metadata: {
+      domStats: actionData.domStats,
+      snapshotFileName: actionData.snapshotFileName,
+      snapshotPath: actionData.snapshotPath,
+      domSnapshotFileName: actionData.domSnapshotFileName,
+      domSnapshotPath: actionData.domSnapshotPath,
+      hasErrors: actionData.hasErrors || false,
+      isLoading: actionData.isLoading || false
+    }
+  });
 
-    const line = JSON.stringify(action) + '\n';
-    globalState.manifestStream.write(line);
-    log.debug('User action recorded (simple format):', action.type);
+  // 立即刷新到文件（网络请求关联由 Preload 层的 CausalChainTracker 处理）
+  // 修复：添加 await 确保事件被正确写入
+  try {
+    await globalState.unifiedEventManager.flushEvent(eventId);
+    log.info('User action recorded and flushed:', actionData.type, 'eventId:', eventId);
+  } catch (err) {
+    log.error('Failed to flush event:', err);
   }
 }
 
@@ -2488,15 +3728,17 @@ function saveUploadedFile(fileData) {
     }
 
     // 记录文件保存事件到 training_manifest.jsonl（与上传事件分开，用于关联 uploads 目录）
-    if (globalState.dataSchemaManager) {
-      const fileSavedEvent = globalState.dataSchemaManager.generateFileIOEvent('upload-saved', {
-        fileName: fileData.fileName,
-        fileSize: fileSize,
-        mimeType: fileData.fileType,
-        localPath: path.join('uploads', fileName),
-        windowId: 'win_1',
+    if (globalState.unifiedEventManager) {
+      globalState.unifiedEventManager.createAndFlushEvent({
+        type: 'file_io',
+        fileType: 'upload-saved',
         url: fileData.url,
+        windowId: 'win_1',
+        localPath: path.join('uploads', fileName),
         metadata: {
+          fileName: fileData.fileName,
+          fileSize: fileSize,
+          mimeType: fileData.fileType,
           xpath: fileData.xpath,
           selector: fileData.selector,
           isImage: fileData.isImage,
@@ -2504,8 +3746,6 @@ function saveUploadedFile(fileData) {
           savedFilePath: filePath
         }
       });
-
-      appendToManifest(fileSavedEvent);
     }
 
     log.info(`Uploaded file saved to: ${filePath}`);
@@ -2578,8 +3818,14 @@ ipcMain.handle('start-recording', async (event, config) => {
   return startRecording(config);
 });
 
-// 选择存储目录（Windows）
+// 选择存储目录（仅 Windows 平台）
 ipcMain.handle('select-storage-directory', async (event) => {
+  // 只在 Windows 平台上支持选择存储目录
+  if (process.platform !== 'win32') {
+    console.log('[Main] select-storage-directory is only supported on Windows');
+    return null;
+  }
+
   const mainWindow = BrowserWindow.getFocusedWindow() || BrowserWindow.getAllWindows()[0];
   const selectedPath = await selectStorageDirectory(mainWindow);
   if (selectedPath) {
@@ -2621,12 +3867,13 @@ ipcMain.handle('pause-recording', async () => {
   broadcastPauseState(true);
 
   // 记录暂停事件
-  if (globalState.dataSchemaManager) {
-    const pauseEvent = globalState.dataSchemaManager.generateUserContextEvent({
-      type: 'pause',
-      description: 'Recording paused by user'
+  if (globalState.unifiedEventManager) {
+    globalState.unifiedEventManager.createAndFlushEvent({
+      type: 'user_context',
+      contextType: 'pause',
+      description: 'Recording paused by user',
+      semanticLabel: 'Recording paused by user'
     });
-    appendToManifest(pauseEvent);
   }
 
   log.info('Recording paused');
@@ -2646,12 +3893,13 @@ ipcMain.handle('resume-recording', async () => {
   broadcastPauseState(false);
 
   // 记录恢复事件
-  if (globalState.dataSchemaManager) {
-    const resumeEvent = globalState.dataSchemaManager.generateUserContextEvent({
-      type: 'resume',
-      description: 'Recording resumed by user'
+  if (globalState.unifiedEventManager) {
+    globalState.unifiedEventManager.createAndFlushEvent({
+      type: 'user_context',
+      contextType: 'resume',
+      description: 'Recording resumed by user',
+      semanticLabel: 'Recording resumed by user'
     });
-    appendToManifest(resumeEvent);
   }
 
   log.info('Recording resumed');
@@ -3032,12 +4280,31 @@ function setupNetworkListeners() {
         };
         
         // 首先尝试直接关联到已有事件
-        const eventTimestamp = findEventTimestampForRequest(requestTimestamp);
+        const eventTimestamp = globalState.associationManager
+          ? globalState.associationManager.findEventTimestamp(requestTimestamp)
+          : findEventTimestampForRequest(requestTimestamp);
+        
         log.info('WebRequest onCompleted - request timestamp:', requestTimestamp, 'matched event:', eventTimestamp, 'url:', url);
         
         if (eventTimestamp) {
-          // 更新暂存的事件，添加网络请求
-          updatePendingEventWithApiRequest(eventTimestamp, apiRequest);
+          if (globalState.associationManager) {
+            // 使用 EventAssociationManager 关联 API 请求
+            globalState.associationManager.associate(eventTimestamp, 'api_request', apiRequest);
+            // 设置 response_status
+            globalState.associationManager.associate(eventTimestamp, 'response_status', {
+              status: statusCode,
+              url: url,
+              timestamp: requestTimestamp
+            });
+          } else {
+            // 回退到旧实现
+            updatePendingEventWithApiRequest(eventTimestamp, apiRequest);
+            updatePendingEventWithResponseStatus(eventTimestamp, {
+              status: statusCode,
+              url: url,
+              timestamp: requestTimestamp
+            });
+          }
           log.info('WebRequest associated to event:', eventTimestamp, 'url:', url);
         } else {
           // 如果没有匹配到事件，将请求加入缓冲队列
@@ -3081,17 +4348,19 @@ function setupNetworkListeners() {
 
         // 只有在录制中且未暂停时才记录
         if (globalState.isRecording && globalState.currentTask && !globalState.isPaused) {
-          // 记录文件事件 - 使用完整Schema
-          const fileEvent = globalState.dataSchemaManager.generateFileIOEvent('preview', {
-            fileName: path.basename(details.url),
-            mimeType: matchedPattern.mimeType,
+          // 记录文件事件 - 使用统一事件格式
+          globalState.unifiedEventManager.createAndFlushEvent({
+            type: 'file_io',
+            fileType: 'preview',
+            url: details.url,
+            windowId: `win_${details.webContentsId}`,
             localPath: null, // 流拦截不保存文件，只记录元数据
             contentSummary: `${matchedPattern.type.toUpperCase()} detected: ${details.url}`,
-            windowId: `win_${details.webContentsId}`,
-            url: details.url
+            metadata: {
+              fileName: path.basename(details.url),
+              mimeType: matchedPattern.mimeType
+            }
           });
-
-          appendToManifest(fileEvent);
         }
       }
     }
@@ -3544,22 +4813,22 @@ async function downloadAndSaveFile(url, headers, ext = '.pdf', fileType = 'docum
             // 保存文件事件到 manifest
             // 使用相对路径 'downloads/filename' 而不是绝对路径
             const relativePath = path.join('downloads', fileName);
-            const fileEvent = globalState.dataSchemaManager.generateFileIOEvent('download', {
-              fileName: fileName,
-              mimeType: mimeType,
-              fileSize: buffer.length,
+            globalState.unifiedEventManager.createAndFlushEvent({
+              type: 'file_io',
+              fileType: 'download',
+              url: url,
+              windowId: 'main',
               localPath: relativePath,
               contentSummary: `${fileType.toUpperCase()} downloaded: ${url}`,
-              windowId: 'main',
-              url: url,
               metadata: {
+                fileName: fileName,
+                mimeType: mimeType,
+                fileSize: buffer.length,
                 originalUrl: url,
                 fileType: fileType,
                 contentLength: headers['content-length'] ? headers['content-length'][0] : buffer.length
               }
             });
-
-            appendToManifest(fileEvent);
 
             resolve(filePath);
           } catch (error) {
@@ -3644,18 +4913,20 @@ ipcMain.on('blob-url-created', (event, data) => {
       }
     }
 
-    // 保存Blob信息 - 使用完整Schema
-    const blobEvent = globalState.dataSchemaManager.generateFileIOEvent('blob', {
-      fileName: fileName,
-      mimeType: blobType,
-      fileSize: blobSize,
+    // 保存Blob信息 - 使用统一事件格式
+    globalState.unifiedEventManager.createAndFlushEvent({
+      type: 'file_io',
+      fileType: 'blob',
+      url: blobUrl,
+      windowId: `win_${event.sender.id}`,
       localPath: localPath,
       contentSummary: `Blob URL created: ${blobUrl}`,
-      windowId: `win_${event.sender.id}`,
-      url: blobUrl
+      metadata: {
+        fileName: fileName,
+        mimeType: blobType,
+        fileSize: blobSize
+      }
     });
-
-    appendToManifest(blobEvent);
 
     log.info(`Blob URL captured: ${blobUrl}, type: ${blobType}, saved: ${!!localPath}`);
   }
@@ -3718,20 +4989,20 @@ ipcMain.on('file-upload', (event, data) => {
   if (globalState.isRecording && globalState.currentTask) {
     const { fileName, fileSize, fileType, formData } = data;
 
-    const uploadEvent = globalState.dataSchemaManager.generateFileIOEvent('upload', {
-      fileName: fileName,
-      fileSize: fileSize,
-      mimeType: fileType,
+    globalState.unifiedEventManager.createAndFlushEvent({
+      type: 'file_io',
+      fileType: 'upload',
+      url: null,
+      windowId: `win_${event.sender.id}`,
       localPath: null,
       contentSummary: `File upload: ${fileName} (${fileSize} bytes)`,
-      windowId: `win_${event.sender.id}`,
-      url: null,
       metadata: {
+        fileName: fileName,
+        fileSize: fileSize,
+        mimeType: fileType,
         formData: formData
       }
     });
-
-    appendToManifest(uploadEvent);
 
     log.info(`File upload captured: ${fileName}, size: ${fileSize}`);
   }
@@ -3743,50 +5014,62 @@ ipcMain.on('report-error', (event, errorData) => {
     globalState.errorDetector.addError(errorData);
   }
 
-  if (globalState.isRecording && globalState.currentTask && globalState.dataSchemaManager) {
-      const errorEvent = globalState.dataSchemaManager.generateErrorEvent(
-        errorData.type || 'unknown',
-        {
-          message: errorData.message,
-          stack: errorData.stack,
-          windowId: `win_${event.sender.id}`,
-          url: null
+  if (globalState.isRecording && globalState.currentTask && globalState.unifiedEventManager) {
+      const errorEvent = globalState.unifiedEventManager.createAndFlushEvent({
+        type: 'error',
+        contextType: errorData.type || 'unknown',
+        description: `Error: ${errorData.message}`,
+        semanticLabel: `${errorData.type || 'unknown'} error detected`,
+        windowId: `win_${event.sender.id}`,
+        url: null,
+        hasErrors: true,
+        metadata: {
+          errorType: errorData.type || 'unknown',
+          errorMessage: errorData.message,
+          errorStack: errorData.stack
         }
-      );
-
-      appendToManifest(errorEvent);
+      });
       
       // 保存错误关联到 correlation log
-      saveCorrelationLog(errorEvent.timestamp, {
-        errorType: errorData.type || 'unknown',
-        message: errorData.message,
-        filename: errorData.filename,
-        lineno: errorData.lineno,
-        stack: errorData.stack,
-        windowId: `win_${event.sender.id}`
-      }, 'error');
+      if (globalState.associationManager) {
+        globalState.associationManager.writeCorrelationLog(errorEvent.timestamp, 'error', {
+          errorType: errorData.type || 'unknown',
+          message: errorData.message,
+          filename: errorData.filename,
+          lineno: errorData.lineno,
+          stack: errorData.stack,
+          windowId: `win_${event.sender.id}`
+        });
+      } else {
+        saveCorrelationLog(errorEvent.timestamp, {
+          errorType: errorData.type || 'unknown',
+          message: errorData.message,
+          filename: errorData.filename,
+          lineno: errorData.lineno,
+          stack: errorData.stack,
+          windowId: `win_${event.sender.id}`
+        }, 'error', errorEvent.eventId);
+      }
     }
 });
 
 // 监听UI事件
 ipcMain.on('report-ui-event', (event, eventData) => {
-  if (globalState.isRecording && globalState.currentTask && globalState.dataSchemaManager) {
-      const uiEvent = globalState.dataSchemaManager.generateUserActionEvent(
-        eventData.type || 'ui_event',
-        {
-          semanticLabel: eventData.semanticLabel || `${eventData.type} event`,
-          domPath: eventData.domPath || null,
-          shadowDomPath: eventData.shadowDomPath || null,
-          coordinates: eventData.coordinates || null,
-          windowId: `win_${event.sender.id}`,
-          url: eventData.url || null,
-          hasErrors: eventData.hasErrors || false,
-          apiRequests: eventData.apiRequests || [],
-          responseStatus: eventData.responseStatus || null
-        }
-      );
-
-      appendToManifest(uiEvent);
+  if (globalState.isRecording && globalState.currentTask && globalState.unifiedEventManager) {
+      globalState.unifiedEventManager.createAndFlushEvent({
+        type: eventData.type || 'ui_event',
+        url: eventData.url || null,
+        windowId: `win_${event.sender.id}`,
+        hasErrors: eventData.hasErrors || false,
+        apiRequests: eventData.apiRequests || [],
+        responseStatus: eventData.responseStatus || null,
+        userAction: {
+          xpath: eventData.domPath || null,
+          shadowPath: eventData.shadowDomPath || null,
+          coordinates: eventData.coordinates || null
+        },
+        semanticLabel: eventData.semanticLabel || `${eventData.type} event`
+      });
     }
 });
 
@@ -3820,17 +5103,17 @@ ipcMain.on('user-action', async (event, actionData) => {
   if (globalState.isRecording && globalState.currentTask) {
     // 使用 actionData 中的 timestamp，确保与 DOM snapshot 文件名一致
     const timestamp = actionData.timestamp || Date.now();
-    
+
     // 检查是否启用了截图功能
     const captureScreenshots = globalState.currentTask.config.options?.captureScreenshots || false;
-    
+
     if (captureScreenshots) {
       const fileName = `snapshot_${timestamp}.png`;
       // 添加 snapshot 引用信息到 actionData（截图将在录制结束后从视频截取）
       actionData.snapshotFileName = fileName;
       actionData.snapshotPath = `previews/snapshots/${fileName}`;
     }
-    
+
     // 对于第一次页面加载事件，使用 snapshot_initial.json 作为 DOM 文件名
     // 后续的页面加载使用普通的 timestamp 文件名
     // 注意：initialSnapshotSaved 标志在 saveDOMSnapshot 函数中设置
@@ -3844,12 +5127,39 @@ ipcMain.on('user-action', async (event, actionData) => {
   }
 
   // 记录用户行为（包含 snapshot 引用信息）
-  recordUserAction(actionData);
+  // 修复：添加 await 确保异步写入完成
+  await recordUserAction(actionData);
 });
 
 // 监听 DOM 快照
 ipcMain.on('dom-snapshot', (event, snapshotData) => {
   saveDOMSnapshot(snapshotData);
+});
+
+// 监听页面加载开始（从 renderer.js 的 did-start-loading 事件发送，比 preload 脚本更早）
+ipcMain.on('page-load-start', (event, loadData) => {
+  if (!globalState.isRecording || !globalState.currentTask) {
+    return;
+  }
+  
+  const timestamp = loadData.timestamp || Date.now();
+  log.info('[Main] Page load start received from renderer:', loadData.url, 'timestamp:', timestamp);
+  
+  // 使用 UnifiedEventManager 创建 page-load-start 事件
+  if (globalState.unifiedEventManager) {
+    const eventId = globalState.unifiedEventManager.generateId('evt_page_load');
+    globalState.unifiedEventManager.createEvent({
+      eventId: eventId,
+      type: 'page-load-start',
+      timestamp: timestamp,
+      url: loadData.url,
+      title: 'Page Load Start',
+      isLoading: true
+    });
+    // 立即刷新到磁盘
+    globalState.unifiedEventManager.flushEvent(eventId);
+    log.info('[Main] Page-load-start event created from renderer:', eventId);
+  }
 });
 
 // 监听网络请求跟踪（已废弃，使用 webRequest.onCompleted 替代）
@@ -3952,6 +5262,33 @@ ipcMain.handle('get-current-window-id', async (event) => {
     return win.id;
   }
   return null;
+});
+
+// 修复：获取当前窗口尺寸
+ipcMain.handle('get-current-window-bounds', async (event) => {
+  const win = BrowserWindow.fromWebContents(event.sender);
+  if (win) {
+    const bounds = win.getBounds();
+    log.info('Get window bounds:', bounds);
+    return bounds;
+  }
+  return null;
+});
+
+// 修复：聚焦当前窗口（避免被其他窗口遮挡）
+ipcMain.handle('focus-current-window', async (event) => {
+  const win = BrowserWindow.fromWebContents(event.sender);
+  if (win) {
+    if (win.isMinimized()) {
+      win.restore();
+    }
+    win.show();
+    win.focus();
+    win.moveTop();
+    log.info('Window focused for recording');
+    return true;
+  }
+  return false;
 });
 
 // 保存视频数据
@@ -4066,8 +5403,17 @@ ipcMain.handle('save-video-data', async (event, taskId, data) => {
         if (code === 0) {
           log.info('Video conversion completed:', mp4Path);
 
-          // 检查是否启用了截图功能
-          const captureScreenshots = globalState.currentTask?.config?.options?.captureScreenshots || false;
+          // 修复：从 task_config.json 读取截图配置，避免依赖 globalState.currentTask
+          let captureScreenshots = false;
+          try {
+            const taskConfigPath = path.join(taskDir, 'task_config.json');
+            if (fs.existsSync(taskConfigPath)) {
+              const taskConfig = JSON.parse(fs.readFileSync(taskConfigPath, 'utf8'));
+              captureScreenshots = taskConfig.options?.captureScreenshots || false;
+            }
+          } catch (err) {
+            log.warn('Failed to read task config for screenshot setting:', err);
+          }
           
           if (captureScreenshots) {
             // 从视频中截取所有需要的帧（根据 training_manifest.jsonl 中的 video_time）
@@ -4164,8 +5510,9 @@ app.whenReady().then(async () => {
   initializeManagers();
   createMainWindow();
 
-  // 设置网络监听（必须在app ready后）
-  setupNetworkListeners();
+  // 网络请求监听已由 Preload 层的 CausalChainTracker 处理
+  // 不再使用 webRequest API（避免重复拦截和时间匹配的不准确性）
+  // setupNetworkListeners();
 
   // 注册新窗口创建事件
   app.on('browser-window-created', (event, window) => {
@@ -4186,23 +5533,21 @@ app.whenReady().then(async () => {
       if (globalState.isRecording && globalState.currentTask) {
         // 记录新窗口打开事件
         const timestamp = Date.now();
-        const newWindowEvent = globalState.dataSchemaManager.generateUserActionEvent('new_window', {
-          semanticLabel: `New window opened: ${url}`,
-          windowId: `win_${window.id}`,
+        const fileName = `snapshot_newwindow_${timestamp}.png`;
+        globalState.unifiedEventManager.createAndFlushEvent({
+          type: 'new_window',
           url: url,
+          windowId: `win_${window.id}`,
+          semanticLabel: `New window opened: ${url}`,
           metadata: {
             frameName: frameName,
             disposition: disposition,
             windowFeatures: options,
-            timestamp: timestamp
+            timestamp: timestamp,
+            snapshotFileName: fileName,
+            snapshotPath: `previews/snapshots/${fileName}`
           }
         });
-        appendToManifest(newWindowEvent);
-
-        // 不再实时截图，改为记录 snapshot 引用（截图将在录制结束后从视频截取）
-        const fileName = `snapshot_newwindow_${timestamp}.png`;
-        newWindowEvent.metadata.snapshotFileName = fileName;
-        newWindowEvent.metadata.snapshotPath = `previews/snapshots/${fileName}`;
         log.info(`New window snapshot reference recorded: ${fileName}`);
       }
     });

@@ -1,0 +1,25 @@
+{
+  "name": "55",
+  "operator": "高一为",
+  "url": "https://www.chinastock.com.cn",
+  "description": "",
+  "options": {
+    "recordVideo": true,
+    "captureDOM": true,
+    "captureAPI": true,
+    "captureState": true,
+    "captureScreenshots": false
+  },
+  "id": "task_1778664098999",
+  "taskId": "task_1778664098999",
+  "userId": "高一为",
+  "role": "operator",
+  "permissions": [
+    "record",
+    "playback"
+  ],
+  "subTaskId": null,
+  "env": {
+    "platform": "darwin"
+  }
+}

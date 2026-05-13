@@ -1,13 +1,5 @@
 const log = require('electron-log');
-
-// 简单的UUID生成函数（不依赖外部模块）
-function generateUUID() {
-  return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, function(c) {
-    const r = Math.random() * 16 | 0;
-    const v = c === 'x' ? r : (r & 0x3 | 0x8);
-    return v.toString(16);
-  });
-}
+const { generateUUID } = require('../shared/utils');
 
 /**
  * 数据Schema管理器
@@ -71,6 +63,9 @@ class DataSchemaManager {
         env: this.currentTask.config.env || null
       },
 
+      // 统一：添加 type 字段，与 UnifiedEventManager 保持一致
+      type: eventType,
+
       // 事件详情
       event_details: {
         action: eventType,
@@ -95,11 +90,51 @@ class DataSchemaManager {
         mutations: data.mutations || []
       },
 
-      // 网络关联
-      network_correlation: {
-        api_requests: data.apiRequests || [],
-        resources: data.resources || [],
-        response_status: data.responseStatus || null
+      // 网络数据（整合后的统一字段）
+      network: {
+        // HTTP/HTTPS 请求（fetch/xhr）- 从 apiRequests 和 resources 整合
+        requests: [
+          ...(data.apiRequests || []),
+          ...(data.resources || []).map(r => ({
+            type: 'resource',
+            url: r.path || r.url,
+            filename: r.filename,
+            timestamp: r.timestamp,
+            size: r.size,
+            resourceType: r.resourceType || 'static'
+          }))
+        ],
+        websocketMessages: data.websocketMessages || [],  // WebSocket 消息
+        sseEvents: data.sseEvents || [],                  // Server-Sent Events
+        beaconRequests: data.beaconRequests || []         // Beacon API 请求
+      },
+      
+      // 通信数据
+      communication: {
+        postMessages: [],       // window.postMessage
+        broadcastChannels: []   // BroadcastChannel
+      },
+      
+      // 存储操作
+      storage: {
+        localStorageOps: [],    // localStorage 操作
+        sessionStorageOps: [],  // sessionStorage 操作
+        indexedDBOps: [],       // IndexedDB 操作
+        cacheOps: []            // Cache API 操作
+      },
+      
+      // 其他操作
+      operations: {
+        clipboardOps: [],       // 剪贴板操作
+        mediaEvents: [],        // 媒体播放事件
+        performanceEntries: [], // 性能指标
+        compositionEvents: [],  // 输入法组合事件
+        pointerEvents: [],      // 指针事件
+        touchEvents: [],        // 触摸事件
+        formSubmissions: [],    // 表单提交
+        lifecycleEvents: [],    // 生命周期事件
+        securityEvents: [],     // 安全事件
+        cssAnimations: []       // CSS 动画
       },
 
       // 谱系关系
@@ -552,7 +587,9 @@ class DataSchemaManager {
       hasErrors: details.hasErrors,
       isLoading: details.isLoading,
       apiRequests: details.apiRequests,
+      resources: details.resources,
       responseStatus: details.responseStatus,
+      mutations: details.mutations,
       metadata: {
         ...details.metadata,
         user_intents: userIntents,
