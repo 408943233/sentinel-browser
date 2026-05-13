@@ -55,7 +55,7 @@ jobs:
       uses: softprops/action-gh-release@v1
       with:
         files: |
-          dist/*
+          dist/*.exe
         draft: true
         prerelease: false
         generate_release_notes: true
