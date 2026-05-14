@@ -2090,18 +2090,17 @@ function handlePageLoadComplete() {
   
   console.log('[Sentinel Webview] Page-load-complete event sent to host, eventId:', eventId, 'duration:', duration);
 
-  // 【修复】页面加载完成后，立即生成 initial DOM snapshot
-  console.log('[Sentinel Webview] Creating initial DOM snapshot after page load');
-  saveDOMSnapshot('initial', timestamp);
-
-  // 【修复】防止重复初始化
+  // 【修复】防止重复初始化 - 必须先检查，避免重复发送 snapshot
   console.log('[Sentinel Webview] Checking initialization, isInitialized:', isInitialized());
   if (isInitialized()) {
-    console.log('[Sentinel Webview] Already initialized, skipping');
+    console.log('[Sentinel Webview] Already initialized, skipping snapshot creation');
     return;
   }
   setInitialized();
-  console.log('[Sentinel Webview] Initialization completed');
+  console.log('[Sentinel Webview] First initialization, creating initial DOM snapshot');
+
+  // 【修复】页面加载完成后，立即生成 initial DOM snapshot（只在第一次初始化时）
+  saveDOMSnapshot('initial', timestamp);
 
   initMutationObserver();
   console.log('[Sentinel Webview] MutationObserver initialized on page load complete');

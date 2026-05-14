@@ -3240,8 +3240,11 @@ async function saveResource(url, resourceType, headers) {
   try {
     const urlObj = new URL(url);
     const fileName = path.basename(urlObj.pathname) || `resource_${Date.now()}`;
-    const ext = path.extname(fileName) || getExtensionByMimeType(headers);
-    const safeFileName = `${Date.now()}_${fileName.replace(/[^a-zA-Z0-9.-]/g, '_')}${ext}`;
+    const existingExt = path.extname(fileName);
+    const ext = existingExt || getExtensionByMimeType(headers);
+    // 【修复】避免重复添加扩展名：如果 fileName 已有扩展名，不再添加
+    const baseName = existingExt ? fileName.slice(0, -existingExt.length) : fileName;
+    const safeFileName = `${Date.now()}_${baseName.replace(/[^a-zA-Z0-9.-]/g, '_')}${ext}`;
     
     const resourcesDir = path.join(globalState.currentTask.dir, 'network', 'resources');
     const filePath = path.join(resourcesDir, safeFileName);
