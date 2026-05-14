@@ -1374,6 +1374,7 @@ let nodeIdMap = new WeakMap();
 let nextNodeId = 1;
 let autoFullSnapshotTimer = null;
 let incrementalSnapshotInterval = null;  // 【修复】存储定期发送增量快照的定时器 ID
+let isInitialized = false;  // 【修复】防止重复初始化
 let pendingMutationsCount = 0;
 const AUTO_SNAPSHOT_DELAY = 500;
 const AUTO_SNAPSHOT_THRESHOLD = 50;  // 【修复】从 10 增加到 50，减少自动 FullSnapshot 触发频率
@@ -2071,6 +2072,13 @@ function handlePageLoadComplete() {
   console.log('[Sentinel Webview] Creating initial DOM snapshot after page load');
   saveDOMSnapshot('initial', timestamp);
 
+  // 【修复】防止重复初始化
+  if (isInitialized) {
+    console.log('[Sentinel Webview] Already initialized, skipping');
+    return;
+  }
+  isInitialized = true;
+
   initMutationObserver();
   console.log('[Sentinel Webview] MutationObserver initialized on page load complete');
 
@@ -2080,15 +2088,15 @@ function handlePageLoadComplete() {
     clearInterval(incrementalSnapshotInterval);
     incrementalSnapshotInterval = null;
   }
-  
+
   incrementalSnapshotInterval = setInterval(() => {
     if (checkPaused()) return;
-    
-    const hasChanges = domMutations.adds.length > 0 || 
-                       domMutations.removes.length > 0 || 
-                       domMutations.texts.length > 0 || 
+
+    const hasChanges = domMutations.adds.length > 0 ||
+                       domMutations.removes.length > 0 ||
+                       domMutations.texts.length > 0 ||
                        domMutations.attributes.length > 0;
-    
+
     if (hasChanges) {
       console.log('[Sentinel Webview] Sending incremental snapshot, changes:', {
         adds: domMutations.adds.length,
