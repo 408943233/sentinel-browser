@@ -2095,11 +2095,13 @@ function handlePageLoadComplete() {
   saveDOMSnapshot('initial', timestamp);
 
   // 【修复】防止重复初始化
+  console.log('[Sentinel Webview] Checking initialization, isInitialized:', isInitialized());
   if (isInitialized()) {
     console.log('[Sentinel Webview] Already initialized, skipping');
     return;
   }
   setInitialized();
+  console.log('[Sentinel Webview] Initialization completed');
 
   initMutationObserver();
   console.log('[Sentinel Webview] MutationObserver initialized on page load complete');
