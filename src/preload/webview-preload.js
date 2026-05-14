@@ -1464,8 +1464,27 @@ function initMutationObserver() {
       }
     });
     
-    if (significantChange && pendingMutationsCount >= AUTO_SNAPSHOT_THRESHOLD) {
-      scheduleAutoFullSnapshot();
+    // 【修复】检测到变化时立即发送增量快照，而不是等待阈值
+    if (significantChange && !checkPaused()) {
+      // 使用 setTimeout 批量处理，避免每个 mutation 都发送
+      if (!window.__sentinelPendingSnapshot) {
+        window.__sentinelPendingSnapshot = true;
+        setTimeout(() => {
+          window.__sentinelPendingSnapshot = false;
+          if (domMutations.adds.length > 0 || 
+              domMutations.removes.length > 0 || 
+              domMutations.texts.length > 0 || 
+              domMutations.attributes.length > 0) {
+            console.log('[Sentinel Webview] Sending incremental snapshot, changes:', {
+              adds: domMutations.adds.length,
+              removes: domMutations.removes.length,
+              texts: domMutations.texts.length,
+              attributes: domMutations.attributes.length
+            });
+            saveDOMSnapshot('incremental');
+          }
+        }, 100); // 100ms 后发送，批量处理
+      }
     }
   });
 
@@ -2085,32 +2104,9 @@ function handlePageLoadComplete() {
   initMutationObserver();
   console.log('[Sentinel Webview] MutationObserver initialized on page load complete');
 
-  // 【修复】定期发送 IncrementalSnapshot，每秒检查一次
-  // 先清理旧的定时器，避免重复创建
-  if (incrementalSnapshotInterval) {
-    clearInterval(incrementalSnapshotInterval);
-    incrementalSnapshotInterval = null;
-  }
-
-  incrementalSnapshotInterval = setInterval(() => {
-    if (checkPaused()) return;
-
-    const hasChanges = domMutations.adds.length > 0 ||
-                       domMutations.removes.length > 0 ||
-                       domMutations.texts.length > 0 ||
-                       domMutations.attributes.length > 0;
-
-    if (hasChanges) {
-      console.log('[Sentinel Webview] Sending incremental snapshot, changes:', {
-        adds: domMutations.adds.length,
-        removes: domMutations.removes.length,
-        texts: domMutations.texts.length,
-        attributes: domMutations.attributes.length
-      });
-      saveDOMSnapshot('incremental');
-    }
-  }, 1000); // 每秒检查一次
-  console.log('[Sentinel Webview] Incremental snapshot interval started');
+  // 【修复】不再使用定时器发送空快照
+  // 改为在 MutationObserver 中检测到变化时立即发送
+  console.log('[Sentinel Webview] Incremental snapshot on-demand mode enabled');
 
   // 延迟清除事件上下文，确保页面加载完成后的短暂时间内 API 请求仍能关联
   setTimeout(() => {
