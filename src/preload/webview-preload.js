@@ -2070,7 +2070,21 @@ ipcRenderer.on('trigger-dom-snapshot', (event, data) => {
   console.log('[Sentinel Webview] Received trigger-dom-snapshot message:', data);
   const type = data?.type || 'incremental';
   const timestamp = data?.timestamp || Date.now();
-  saveDOMSnapshot(type, timestamp);
+
+  // 【修复】对于 incremental 类型，只在有实际 DOM 变化时才发送
+  if (type === 'incremental') {
+    if (domMutations.adds.length > 0 ||
+        domMutations.removes.length > 0 ||
+        domMutations.texts.length > 0 ||
+        domMutations.attributes.length > 0) {
+      saveDOMSnapshot(type, timestamp);
+    } else {
+      console.log('[Sentinel Webview] Skipping empty incremental snapshot');
+    }
+  } else {
+    // initial 和 auto 类型直接发送
+    saveDOMSnapshot(type, timestamp);
+  }
 });
 
 // 页面加载完成处理函数
