@@ -1373,9 +1373,10 @@ let domMutations = { adds: [], removes: [], texts: [], attributes: [] };
 let nodeIdMap = new WeakMap();
 let nextNodeId = 1;
 let autoFullSnapshotTimer = null;
+let incrementalSnapshotInterval = null;  // 【修复】存储定期发送增量快照的定时器 ID
 let pendingMutationsCount = 0;
 const AUTO_SNAPSHOT_DELAY = 500;
-const AUTO_SNAPSHOT_THRESHOLD = 10;
+const AUTO_SNAPSHOT_THRESHOLD = 50;  // 【修复】从 10 增加到 50，减少自动 FullSnapshot 触发频率
 
 function getNodeId(node) {
   if (!node) return null;
@@ -1488,11 +1489,20 @@ function serializeNodeForMutation(node) {
       }
     }
 
+    // 【修复】递归序列化子节点，而不是只记录 ID
+    const childNodes = [];
+    for (const child of node.childNodes) {
+      const serializedChild = serializeNodeForMutation(child);
+      if (serializedChild) {
+        childNodes.push(serializedChild);
+      }
+    }
+
     return {
       type: NodeType.Element,
       tagName: node.tagName.toLowerCase(),
       attributes: attributes,
-      childNodes: Array.from(node.childNodes).map(child => getNodeId(child)).filter(id => id !== null),
+      childNodes: childNodes,  // 【修复】存储完整的子节点对象
       id: getNodeId(node)
     };
   }
@@ -2063,6 +2073,33 @@ function handlePageLoadComplete() {
 
   initMutationObserver();
   console.log('[Sentinel Webview] MutationObserver initialized on page load complete');
+
+  // 【修复】定期发送 IncrementalSnapshot，每秒检查一次
+  // 先清理旧的定时器，避免重复创建
+  if (incrementalSnapshotInterval) {
+    clearInterval(incrementalSnapshotInterval);
+    incrementalSnapshotInterval = null;
+  }
+  
+  incrementalSnapshotInterval = setInterval(() => {
+    if (checkPaused()) return;
+    
+    const hasChanges = domMutations.adds.length > 0 || 
+                       domMutations.removes.length > 0 || 
+                       domMutations.texts.length > 0 || 
+                       domMutations.attributes.length > 0;
+    
+    if (hasChanges) {
+      console.log('[Sentinel Webview] Sending incremental snapshot, changes:', {
+        adds: domMutations.adds.length,
+        removes: domMutations.removes.length,
+        texts: domMutations.texts.length,
+        attributes: domMutations.attributes.length
+      });
+      saveDOMSnapshot('incremental');
+    }
+  }, 1000); // 每秒检查一次
+  console.log('[Sentinel Webview] Incremental snapshot interval started');
 
   // 延迟清除事件上下文，确保页面加载完成后的短暂时间内 API 请求仍能关联
   setTimeout(() => {
