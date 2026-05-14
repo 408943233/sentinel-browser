@@ -1374,8 +1374,11 @@ let nodeIdMap = new WeakMap();
 let nextNodeId = 1;
 let autoFullSnapshotTimer = null;
 let incrementalSnapshotInterval = null;  // 【修复】存储定期发送增量快照的定时器 ID
-let isInitialized = false;  // 【修复】防止重复初始化
 let pendingMutationsCount = 0;
+
+// 【修复】使用 window 对象存储初始化标志，避免页面导航时重置
+const isInitialized = () => window.__sentinelWebviewInitialized === true;
+const setInitialized = () => { window.__sentinelWebviewInitialized = true; };
 const AUTO_SNAPSHOT_DELAY = 500;
 const AUTO_SNAPSHOT_THRESHOLD = 50;  // 【修复】从 10 增加到 50，减少自动 FullSnapshot 触发频率
 
@@ -2073,11 +2076,11 @@ function handlePageLoadComplete() {
   saveDOMSnapshot('initial', timestamp);
 
   // 【修复】防止重复初始化
-  if (isInitialized) {
+  if (isInitialized()) {
     console.log('[Sentinel Webview] Already initialized, skipping');
     return;
   }
-  isInitialized = true;
+  setInitialized();
 
   initMutationObserver();
   console.log('[Sentinel Webview] MutationObserver initialized on page load complete');
