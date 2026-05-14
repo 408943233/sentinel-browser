@@ -1658,9 +1658,15 @@ document.addEventListener('click', (e) => {
 
   ipcRenderer.sendToHost('sentinel-click', clickData);
   console.log('[Sentinel Webview] Click tracked:', clickData.selector, 'eventId:', eventId);
-  
+
   setTimeout(() => {
-    saveDOMSnapshot('incremental', timestamp);
+    // 【修复】只在有实际 DOM 变化时才发送 incremental snapshot
+    if (domMutations.adds.length > 0 ||
+        domMutations.removes.length > 0 ||
+        domMutations.texts.length > 0 ||
+        domMutations.attributes.length > 0) {
+      saveDOMSnapshot('incremental', timestamp);
+    }
     setTimeout(() => {
       // 修复：添加更严格的空值检查
       if (causalChain && causalChain.clearCurrentEvent && typeof causalChain.clearCurrentEvent === 'function') {
@@ -1711,7 +1717,15 @@ document.addEventListener('input', (e) => {
     };
 
     ipcRenderer.sendToHost('sentinel-input', inputData);
-    setTimeout(() => { saveDOMSnapshot('incremental', timestamp); }, 100);
+    setTimeout(() => {
+      // 【修复】只在有实际 DOM 变化时才发送 incremental snapshot
+      if (domMutations.adds.length > 0 ||
+          domMutations.removes.length > 0 ||
+          domMutations.texts.length > 0 ||
+          domMutations.attributes.length > 0) {
+        saveDOMSnapshot('incremental', timestamp);
+      }
+    }, 100);
 
     // 修复：延迟清除事件上下文
     setTimeout(() => {
@@ -2090,18 +2104,12 @@ function handlePageLoadComplete() {
   
   console.log('[Sentinel Webview] Page-load-complete event sent to host, eventId:', eventId, 'duration:', duration);
 
-  // 【修复】防止重复初始化 - 必须先检查，避免重复发送 snapshot
-  console.log('[Sentinel Webview] Checking initialization, isInitialized:', isInitialized());
-  if (isInitialized()) {
-    console.log('[Sentinel Webview] Already initialized, skipping snapshot creation');
-    return;
-  }
-  setInitialized();
-  console.log('[Sentinel Webview] First initialization, creating initial DOM snapshot');
-
-  // 【修复】页面加载完成后，立即生成 initial DOM snapshot（只在第一次初始化时）
+  // 【修正】每次页面加载都应该发送 initial snapshot，因为 DOM 完全不同了
+  // 撤销之前的错误修复：不能用 isInitialized 阻止，否则新页面没有 initial snapshot
   saveDOMSnapshot('initial', timestamp);
+  console.log('[Sentinel Webview] Initial DOM snapshot created after page load');
 
+  // 每次页面加载都重新初始化 MutationObserver（因为 DOM 完全不同）
   initMutationObserver();
   console.log('[Sentinel Webview] MutationObserver initialized on page load complete');
 
