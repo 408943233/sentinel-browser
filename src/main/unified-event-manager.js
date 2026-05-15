@@ -100,7 +100,17 @@ class UnifiedEventManager {
      * Value: 请求数据
      */
     this.requests = new Map();
-    
+
+    /**
+     * 【修复】Storage/Operations 操作缓存
+     * 用于缓存没有有效 eventId 的存储操作，等到有事件时再关联
+     * Key: timestamp（时间戳，用于匹配最近的事件）
+     * Value: { type, operationData, timestamp }
+     */
+    this.pendingStorageOps = [];
+    this.pendingOperationsOps = [];
+    this.pendingCommunicationOps = [];
+
     // ==================== 写入队列 ====================
     
     /**
@@ -564,7 +574,10 @@ class UnifiedEventManager {
       totalEvents: this.events.size,
       memoryUsage: process.memoryUsage().heapUsed / 1024 / 1024 + 'MB'
     });
-    
+
+    // 【修复】尝试关联缓存的 Storage/Operations/Communication 操作
+    this._tryAssociatePendingOps();
+
     return event;
   }
 
@@ -769,16 +782,34 @@ class UnifiedEventManager {
   /**
    * 关联存储操作到事件
    * 在收到 sentinel-storage-operation/indexeddb-operation/cache-operation 消息时调用
-   * 
+   *
    * @param {string} eventId - 目标事件ID
    * @param {Object} operationData - 操作数据
    * @param {string} operationData.type - 存储类型（localStorage/sessionStorage/indexedDB/cache）
    * @returns {boolean} 关联成功返回 true
    */
   associateStorageOperation(eventId, operationData) {
+    // 【修复】如果没有有效的 eventId，缓存起来等待后续关联
+    if (!eventId) {
+      console.log('[UnifiedEventManager] No eventId for storage operation, caching:', operationData.type);
+      this.pendingStorageOps.push({
+        operationData,
+        timestamp: Date.now()
+      });
+      // 尝试关联到最近的事件
+      this._tryAssociatePendingOps();
+      return false;
+    }
+
     const event = this.events.get(eventId);
     if (!event) {
       console.warn('[UnifiedEventManager] Event not found for storage association:', eventId);
+      // 【修复】缓存起来，等待事件创建后再关联
+      this.pendingStorageOps.push({
+        eventId,
+        operationData,
+        timestamp: Date.now()
+      });
       return false;
     }
 
@@ -1016,6 +1047,66 @@ class UnifiedEventManager {
     }
     event.operations.cssAnimations.push(cssData);
     return true;
+  }
+
+  /**
+   * 【修复】尝试将缓存的 Storage/Operations/Communication 操作关联到最近的事件
+   * 当新事件创建时调用，尝试关联之前缓存的操作
+   */
+  _tryAssociatePendingOps() {
+    if (this.pendingStorageOps.length === 0 &&
+        this.pendingOperationsOps.length === 0 &&
+        this.pendingCommunicationOps.length === 0) {
+      return;
+    }
+
+    // 获取最近的事件
+    let latestEvent = null;
+    let latestTimestamp = 0;
+    for (const [eventId, event] of this.events) {
+      if (event.timestamp > latestTimestamp) {
+        latestTimestamp = event.timestamp;
+        latestEvent = event;
+      }
+    }
+
+    if (!latestEvent) {
+      console.log('[UnifiedEventManager] No events available for pending ops association');
+      return;
+    }
+
+    const now = Date.now();
+    const maxAge = 5000; // 5秒内缓存的操作才关联
+
+    // 关联 Storage 操作
+    let storageAssociated = 0;
+    this.pendingStorageOps = this.pendingStorageOps.filter(pending => {
+      if (now - pending.timestamp > maxAge) return false; // 过期删除
+
+      const event = pending.eventId ? this.events.get(pending.eventId) : latestEvent;
+      if (!event) return true; // 保留，等待下次尝试
+
+      switch (pending.operationData.type) {
+        case 'localStorage':
+          event.storage.localStorageOps.push(pending.operationData);
+          break;
+        case 'sessionStorage':
+          event.storage.sessionStorageOps.push(pending.operationData);
+          break;
+        case 'indexedDB':
+          event.storage.indexedDBOps.push(pending.operationData);
+          break;
+        case 'cache':
+          event.storage.cacheOps.push(pending.operationData);
+          break;
+      }
+      storageAssociated++;
+      return false; // 关联成功，从缓存中删除
+    });
+
+    if (storageAssociated > 0) {
+      console.log('[UnifiedEventManager] Associated pending storage ops:', storageAssociated, 'to event:', latestEvent.eventId);
+    }
   }
 
   // ==================== 写入管理 ====================
