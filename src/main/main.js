@@ -760,13 +760,17 @@ function createMainWindow() {
           xpath: data.xpath,
           tagName: data.tagName,
           coordinates: data.coordinates,
-          url: data.url
+          url: data.url,
+          eventId: data.eventId,
+          snapshotFileName: data.snapshotFileName
         });
 
         // 记录 click 事件（不再实时截图，改为记录 video_time，录制结束后从视频截取）
         {
           // 使用事件中的 timestamp，确保与 DOM snapshot 文件名一致
           const timestamp = data.timestamp || Date.now();
+          // 【修复】使用 preload 传递的确定性文件名（基于 eventId）
+          const domSnapshotFileName = data.snapshotFileName || `snapshot_${timestamp}.json`;
           const clickData = {
             // 修复：传递 eventId，确保网络请求能关联到 click 事件
             eventId: data.eventId,
@@ -785,8 +789,9 @@ function createMainWindow() {
             // 生成 snapshot 文件名（用于后续从视频截取）
             snapshotFileName: `snapshot_${timestamp}.png`,
             snapshotPath: `previews/snapshots/snapshot_${timestamp}.png`,
-            domSnapshotFileName: `snapshot_${timestamp}.json`,
-            domSnapshotPath: `dom/snapshot_${timestamp}.json`
+            // 【修复】使用基于 eventId 的确定性文件名
+            domSnapshotFileName: domSnapshotFileName,
+            domSnapshotPath: `dom/${domSnapshotFileName}`
           };
 
           // 记录 click 事件（包含 snapshot 引用信息，截图将在录制结束后从视频截取）
@@ -796,9 +801,11 @@ function createMainWindow() {
         break;
 
       case 'sentinel-input':
-        log.debug('Webview input received:', data.selector);
+        log.debug('Webview input received:', data.selector, 'eventId:', data.eventId, 'snapshotFileName:', data.snapshotFileName);
         {
           const timestamp = data.timestamp || Date.now();
+          // 【修复】使用 preload 传递的确定性文件名（基于 eventId）
+          const domSnapshotFileName = data.snapshotFileName || `snapshot_${timestamp}.json`;
           recordUserAction({
             // 修复：传递 eventId，确保网络请求能关联到 input 事件
             eventId: data.eventId,
@@ -812,8 +819,9 @@ function createMainWindow() {
             url: data.url,
             // 从 preload 传递的 DOM 统计信息
             domStats: data.domStats || null,
-            domSnapshotFileName: `snapshot_${timestamp}.json`,
-            domSnapshotPath: `dom/snapshot_${timestamp}.json`
+            // 【修复】使用基于 eventId 的确定性文件名
+            domSnapshotFileName: domSnapshotFileName,
+            domSnapshotPath: `dom/${domSnapshotFileName}`
           });
 
           // DOM snapshot 由 renderer.js 触发，这里不再重复触发
