@@ -307,13 +307,17 @@ class AsyncContextTracker {
 }
 
 // ============================================================================
+// 引入统一 ID 生成服务
+// ============================================================================
+const EventIdService = require('../shared/event-id-service');
+
+// ============================================================================
 // 内联的 CausalChainTracker 类
 // ============================================================================
 class CausalChainTracker {
   constructor(ipcRenderer) {
     this.ipcRenderer = ipcRenderer;
     this.requestMap = new Map();
-    this.eventCounter = 0;
     this.requestTimeout = 30000;
 
     // 诊断统计：eventId 为 null 的情况
@@ -451,8 +455,12 @@ class CausalChainTracker {
     }, 30000); // 每30秒上报一次
   }
 
-  generateId(prefix = 'id') {
-    return `${prefix}_${Date.now()}_${++this.eventCounter}_${Math.random().toString(36).substr(2, 9)}`;
+  /**
+   * 生成唯一 ID
+   * 使用统一 ID 生成服务
+   */
+  generateId(prefix = 'evt', metadata = {}) {
+    return EventIdService.generateId(prefix, metadata);
   }
 
   setCurrentEvent(eventType, eventData = {}) {
@@ -501,8 +509,9 @@ class CausalChainTracker {
     return this.asyncContext.getCurrentEventId();
   }
 
-  recordRequestStart(requestId, type, url, method, body = null) {
-    const eventId = this.getCurrentEventId();
+  recordRequestStart(requestId, type, url, method, body = null, savedEventId = null) {
+    // 【修复】优先使用传入的 eventId，否则尝试获取当前 context 的 eventId
+    const eventId = savedEventId || this.getCurrentEventId();
     
     // 记录统计信息
     this.recordRequestStats(eventId, url);
@@ -582,6 +591,64 @@ class CausalChainTracker {
     return record;
   }
 
+  /**
+   * 【新增】使用指定的 eventId 记录请求完成
+   * 用于修复 async/await 导致的 context 丢失问题
+   */
+  recordRequestCompleteWithEventId(requestId, status, responseHeaders, responseBody, savedEventId) {
+    console.log('[CausalChainTracker] recordRequestCompleteWithEventId called:', { requestId, status, savedEventId });
+    
+    let startRecord = this.requestMap.get(requestId);
+    if (!startRecord) {
+      console.warn('[CausalChainTracker] Request start record not found:', requestId);
+      startRecord = {
+        requestId: requestId,
+        eventId: null,
+        type: 'unknown',
+        url: 'unknown',
+        method: 'unknown',
+        timestamp: Date.now()
+      };
+    }
+
+    // 使用保存的 eventId（优先）或尝试恢复
+    let eventId = savedEventId || startRecord.eventId;
+    let recoveredEventId = false;
+    
+    if (!eventId) {
+      eventId = this.getCurrentEventId();
+      if (eventId) {
+        recoveredEventId = true;
+        console.log('[CausalChainTracker] Request completed with delayed eventId:', requestId, eventId);
+      } else {
+        this.recordNullEventId(`request-complete-no-recovery`, startRecord.url, startRecord.method);
+      }
+    }
+
+    const record = {
+      ...startRecord,
+      eventId: eventId,
+      status: status,
+      responseHeaders: responseHeaders,
+      responseBody: responseBody,
+      endTime: performance.now(),
+      duration: performance.now() - (startRecord.startTime || performance.now()),
+      timestamp: Date.now(),
+      recoveredEventId: recoveredEventId
+    };
+
+    console.log('[CausalChainTracker] Sending sentinel-request-complete (with saved eventId):', { 
+      requestId: record.requestId, 
+      type: record.type, 
+      url: record.url,
+      eventId: record.eventId,
+      savedEventId: savedEventId
+    });
+    this.ipcRenderer.sendToHost('sentinel-request-complete', record);
+    this.requestMap.delete(requestId);
+    return record;
+  }
+
   startRequestCleanup() {
     setInterval(() => {
       const now = Date.now();
@@ -609,7 +676,11 @@ class CausalChainTracker {
       const method = init.method || 'GET';
       const body = init.body || null;
 
-      self.recordRequestStart(requestId, 'fetch', url, method, body);
+      // 【修复】在 await 之前保存 eventId，防止 async context 丢失
+      const eventId = self.getCurrentEventId();
+
+      // 【修复】传递保存的 eventId 到 recordRequestStart
+      self.recordRequestStart(requestId, 'fetch', url, method, body, eventId);
 
       try {
         const response = await originalFetch.call(this, input, init);
@@ -628,7 +699,8 @@ class CausalChainTracker {
 
         const headers = {};
         response.headers.forEach((value, key) => { headers[key] = value; });
-        self.recordRequestComplete(requestId, response.status, headers, responseBody);
+        // 【修复】使用保存的 eventId，而不是重新获取（可能已经丢失）
+        self.recordRequestCompleteWithEventId(requestId, response.status, headers, responseBody, eventId);
         return response;
       } catch (error) {
         self.ipcRenderer.sendToHost('sentinel-request-error', {
@@ -660,7 +732,11 @@ class CausalChainTracker {
       const url = this._sentinelUrl;
 
       if (requestId) {
-        self.recordRequestStart(requestId, 'xhr', url, method, body);
+        // 【修复】在事件监听器设置前保存 eventId
+        const savedEventId = self.getCurrentEventId();
+        
+        // 【修复】传递保存的 eventId 到 recordRequestStart
+        self.recordRequestStart(requestId, 'xhr', url, method, body, savedEventId);
 
         this.addEventListener('load', function() {
           const headers = {};
@@ -671,7 +747,8 @@ class CausalChainTracker {
               if (parts.length === 2) headers[parts[0]] = parts[1];
             });
           }
-          self.recordRequestComplete(requestId, this.status, headers, this.response);
+          // 【修复】使用保存的 eventId，防止事件回调中 context 丢失
+          self.recordRequestCompleteWithEventId(requestId, this.status, headers, this.response, savedEventId);
         });
 
         this.addEventListener('error', function() {
@@ -707,9 +784,11 @@ class CausalChainTracker {
 
       const originalSend = ws.send;
       ws.send = function(data) {
+        // 【修复】保存当前 eventId，防止 async context 丢失
+        const msgEventId = self.getCurrentEventId();
         self.ipcRenderer.sendToHost('sentinel-websocket-message', {
           wsId: wsId,
-          eventId: self.getCurrentEventId(),
+          eventId: msgEventId,
           direction: 'send',
           data: typeof data === 'string' ? data : '[Binary]',
           timestamp: Date.now()
@@ -718,9 +797,11 @@ class CausalChainTracker {
       };
 
       ws.addEventListener('message', (event) => {
+        // 【修复】保存当前 eventId，防止 async context 丢失
+        const msgEventId = self.getCurrentEventId();
         self.ipcRenderer.sendToHost('sentinel-websocket-message', {
           wsId: wsId,
-          eventId: self.getCurrentEventId(),
+          eventId: msgEventId,
           direction: 'receive',
           data: typeof event.data === 'string' ? event.data : '[Binary]',
           timestamp: Date.now()
@@ -756,9 +837,11 @@ class CausalChainTracker {
       });
 
       es.addEventListener('message', (event) => {
+        // 【修复】保存当前 eventId，防止 async context 丢失
+        const msgEventId = self.getCurrentEventId();
         self.ipcRenderer.sendToHost('sentinel-sse-message', {
           esId: esId,
-          eventId: self.getCurrentEventId(),
+          eventId: msgEventId,
           data: event.data,
           timestamp: Date.now()
         });
@@ -791,8 +874,10 @@ class CausalChainTracker {
     const self = this;
 
     window.postMessage = function(message, targetOrigin, transfer) {
+      // 【修复】保存当前 eventId，防止 async context 丢失
+      const eventId = self.getCurrentEventId();
       self.ipcRenderer.sendToHost('sentinel-postmessage', {
-        eventId: self.getCurrentEventId(),
+        eventId: eventId,
         message: typeof message === 'object' ? JSON.stringify(message) : String(message),
         targetOrigin: targetOrigin,
         timestamp: Date.now()
@@ -813,9 +898,11 @@ class CausalChainTracker {
 
       const originalPostMessage = channel.postMessage;
       channel.postMessage = function(message) {
+        // 【修复】保存当前 eventId，防止 async context 丢失
+        const eventId = self.getCurrentEventId();
         self.ipcRenderer.sendToHost('sentinel-broadcastchannel', {
           bcId: bcId,
-          eventId: self.getCurrentEventId(),
+          eventId: eventId,
           name: name,
           message: typeof message === 'object' ? JSON.stringify(message) : String(message),
           timestamp: Date.now()
@@ -833,8 +920,10 @@ class CausalChainTracker {
 
     const originalSetItem = Storage.prototype.setItem;
     Storage.prototype.setItem = function(key, value) {
+      // 【修复】保存当前 eventId，防止 async context 丢失
+      const eventId = self.getCurrentEventId();
       self.ipcRenderer.sendToHost('sentinel-storage', {
-        eventId: self.getCurrentEventId(),
+        eventId: eventId,
         type: this === localStorage ? 'localStorage' : 'sessionStorage',
         action: 'setItem',
         key: key,
@@ -845,8 +934,10 @@ class CausalChainTracker {
 
     const originalRemoveItem = Storage.prototype.removeItem;
     Storage.prototype.removeItem = function(key) {
+      // 【修复】保存当前 eventId，防止 async context 丢失
+      const eventId = self.getCurrentEventId();
       self.ipcRenderer.sendToHost('sentinel-storage', {
-        eventId: self.getCurrentEventId(),
+        eventId: eventId,
         type: this === localStorage ? 'localStorage' : 'sessionStorage',
         action: 'removeItem',
         key: key,
@@ -857,8 +948,10 @@ class CausalChainTracker {
 
     const originalClear = Storage.prototype.clear;
     Storage.prototype.clear = function() {
+      // 【修复】保存当前 eventId，防止 async context 丢失
+      const eventId = self.getCurrentEventId();
       self.ipcRenderer.sendToHost('sentinel-storage', {
-        eventId: self.getCurrentEventId(),
+        eventId: eventId,
         type: this === localStorage ? 'localStorage' : 'sessionStorage',
         action: 'clear',
         timestamp: Date.now()
@@ -874,8 +967,10 @@ class CausalChainTracker {
     const self = this;
 
     window.indexedDB.open = function(name, version) {
+      // 【修复】保存当前 eventId，防止 async context 丢失
+      const eventId = self.getCurrentEventId();
       self.ipcRenderer.sendToHost('sentinel-indexeddb', {
-        eventId: self.getCurrentEventId(),
+        eventId: eventId,
         action: 'open',
         name: name,
         version: version,
@@ -892,8 +987,10 @@ class CausalChainTracker {
     const self = this;
 
     window.caches.open = function(cacheName) {
+      // 【修复】保存当前 eventId，防止 async context 丢失
+      const eventId = self.getCurrentEventId();
       self.ipcRenderer.sendToHost('sentinel-cache', {
-        eventId: self.getCurrentEventId(),
+        eventId: eventId,
         action: 'open',
         cacheName: cacheName,
         timestamp: Date.now()
@@ -908,8 +1005,10 @@ class CausalChainTracker {
 
     const originalWriteText = navigator.clipboard.writeText;
     navigator.clipboard.writeText = function(text) {
+      // 【修复】保存当前 eventId，防止 async context 丢失
+      const eventId = self.getCurrentEventId();
       self.ipcRenderer.sendToHost('sentinel-clipboard', {
-        eventId: self.getCurrentEventId(),
+        eventId: eventId,
         action: 'writeText',
         timestamp: Date.now()
       });
@@ -918,8 +1017,10 @@ class CausalChainTracker {
 
     const originalWrite = navigator.clipboard.write;
     navigator.clipboard.write = function(data) {
+      // 【修复】保存当前 eventId，防止 async context 丢失
+      const eventId = self.getCurrentEventId();
       self.ipcRenderer.sendToHost('sentinel-clipboard', {
-        eventId: self.getCurrentEventId(),
+        eventId: eventId,
         action: 'write',
         timestamp: Date.now()
       });
@@ -932,8 +1033,10 @@ class CausalChainTracker {
     const self = this;
     ['compositionstart', 'compositionupdate', 'compositionend'].forEach(eventType => {
       document.addEventListener(eventType, (e) => {
+        // 【修复】保存当前 eventId，防止 async context 丢失
+        const eventId = self.getCurrentEventId();
         self.ipcRenderer.sendToHost('sentinel-composition', {
-          eventId: self.getCurrentEventId(),
+          eventId: eventId,
           type: eventType,
           target: e.target.tagName,
           xpath: self.getXPath(e.target),
@@ -950,8 +1053,10 @@ class CausalChainTracker {
     ['play', 'pause', 'seeked', 'ended'].forEach(eventType => {
       document.addEventListener(eventType, (e) => {
         if (e.target.tagName === 'VIDEO' || e.target.tagName === 'AUDIO') {
+          // 【修复】保存当前 eventId，防止 async context 丢失
+          const eventId = self.getCurrentEventId();
           self.ipcRenderer.sendToHost('sentinel-media-event', {
-            eventId: self.getCurrentEventId(),
+            eventId: eventId,
             type: eventType,
             mediaType: e.target.tagName.toLowerCase(),
             src: e.target.src,
@@ -973,8 +1078,10 @@ class CausalChainTracker {
       for (const [key, value] of formData.entries()) {
         data[key] = key.toLowerCase().includes('password') || key.toLowerCase().includes('token') ? '[REDACTED]' : value;
       }
+      // 【修复】保存当前 eventId，防止 async context 丢失
+      const eventId = self.getCurrentEventId();
       self.ipcRenderer.sendToHost('sentinel-form-submit', {
-        eventId: self.getCurrentEventId(),
+        eventId: eventId,
         action: form.action,
         method: form.method,
         enctype: form.enctype,
@@ -989,8 +1096,10 @@ class CausalChainTracker {
     const self = this;
     ['pointerdown', 'pointermove', 'pointerup', 'pointercancel'].forEach(eventType => {
       document.addEventListener(eventType, (e) => {
+        // 【修复】保存当前 eventId，防止 async context 丢失
+        const eventId = self.getCurrentEventId();
         self.ipcRenderer.sendToHost('sentinel-pointer-event', {
-          eventId: self.getCurrentEventId(),
+          eventId: eventId,
           type: eventType,
           pointerId: e.pointerId,
           pointerType: e.pointerType,
@@ -1017,8 +1126,10 @@ class CausalChainTracker {
             force: e.touches[i].force
           });
         }
+        // 【修复】保存当前 eventId，防止 async context 丢失
+        const eventId = self.getCurrentEventId();
         self.ipcRenderer.sendToHost('sentinel-touch-event', {
-          eventId: self.getCurrentEventId(),
+          eventId: eventId,
           type: eventType,
           touches: touches,
           target: e.target.tagName,
@@ -1033,8 +1144,10 @@ class CausalChainTracker {
     const self = this;
 
     document.addEventListener('visibilitychange', () => {
+      // 【修复】保存当前 eventId，防止 async context 丢失
+      const eventId = self.getCurrentEventId();
       self.ipcRenderer.sendToHost('sentinel-visibility-change', {
-        eventId: self.getCurrentEventId(),
+        eventId: eventId,
         hidden: document.hidden,
         visibilityState: document.visibilityState,
         timestamp: Date.now()
@@ -1042,8 +1155,10 @@ class CausalChainTracker {
     });
 
     window.addEventListener('beforeunload', () => {
+      // 【修复】保存当前 eventId，防止 async context 丢失
+      const eventId = self.getCurrentEventId();
       self.ipcRenderer.sendToHost('sentinel-before-unload', {
-        eventId: self.getCurrentEventId(),
+        eventId: eventId,
         url: window.location.href,
         timestamp: Date.now()
       });
@@ -1053,8 +1168,10 @@ class CausalChainTracker {
     window.addEventListener('resize', () => {
       clearTimeout(resizeTimeout);
       resizeTimeout = setTimeout(() => {
+        // 【修复】保存当前 eventId，防止 async context 丢失
+        const eventId = self.getCurrentEventId();
         self.ipcRenderer.sendToHost('sentinel-resize', {
-          eventId: self.getCurrentEventId(),
+          eventId: eventId,
           width: window.innerWidth,
           height: window.innerHeight,
           timestamp: Date.now()
@@ -1070,8 +1187,10 @@ class CausalChainTracker {
       try {
         const observer = new PerformanceObserver((list) => {
           for (const entry of list.getEntries()) {
+            // 【修复】保存当前 eventId，防止 async context 丢失
+            const eventId = self.getCurrentEventId();
             self.ipcRenderer.sendToHost('sentinel-performance', {
-              eventId: self.getCurrentEventId(),
+              eventId: eventId,
               type: entry.entryType,
               name: entry.name,
               duration: entry.duration,
@@ -1088,8 +1207,10 @@ class CausalChainTracker {
   initSecurityIntercept() {
     const self = this;
     document.addEventListener('securitypolicyviolation', (e) => {
+      // 【修复】保存当前 eventId，防止 async context 丢失
+      const eventId = self.getCurrentEventId();
       self.ipcRenderer.sendToHost('sentinel-csp-violation', {
-        eventId: self.getCurrentEventId(),
+        eventId: eventId,
         blockedURI: e.blockedURI,
         violatedDirective: e.violatedDirective,
         originalPolicy: e.originalPolicy,
@@ -1104,8 +1225,10 @@ class CausalChainTracker {
     const self = this;
     ['animationstart', 'animationend'].forEach(eventType => {
       document.addEventListener(eventType, (e) => {
+        // 【修复】保存当前 eventId，防止 async context 丢失
+        const eventId = self.getCurrentEventId();
         self.ipcRenderer.sendToHost('sentinel-css-animation', {
-          eventId: self.getCurrentEventId(),
+          eventId: eventId,
           type: eventType,
           animationName: e.animationName,
           target: e.target.tagName,
@@ -1115,8 +1238,10 @@ class CausalChainTracker {
     });
     ['transitionstart', 'transitionend'].forEach(eventType => {
       document.addEventListener(eventType, (e) => {
+        // 【修复】保存当前 eventId，防止 async context 丢失
+        const eventId = self.getCurrentEventId();
         self.ipcRenderer.sendToHost('sentinel-css-transition', {
-          eventId: self.getCurrentEventId(),
+          eventId: eventId,
           type: eventType,
           propertyName: e.propertyName,
           target: e.target.tagName,
@@ -1656,17 +1781,17 @@ document.addEventListener('click', (e) => {
     domStats: collectDOMStats()
   };
 
+  // 使用 eventId 生成确定性 snapshot 文件名
+  const snapshotFileName = EventIdService.getSnapshotFileName(eventId, 'json');
+  clickData.snapshotFileName = snapshotFileName;
+
   ipcRenderer.sendToHost('sentinel-click', clickData);
-  console.log('[Sentinel Webview] Click tracked:', clickData.selector, 'eventId:', eventId);
+  console.log('[Sentinel Webview] Click tracked:', clickData.selector, 'eventId:', eventId, 'snapshot:', snapshotFileName);
 
   setTimeout(() => {
-    // 【修复】只在有实际 DOM 变化时才发送 incremental snapshot
-    if (domMutations.adds.length > 0 ||
-        domMutations.removes.length > 0 ||
-        domMutations.texts.length > 0 ||
-        domMutations.attributes.length > 0) {
-      saveDOMSnapshot('incremental', timestamp);
-    }
+    // 【优化】使用 eventId 触发 snapshot，确保 100% 关联
+    saveDOMSnapshot('user-action', eventId, { action: 'click', selector: clickData.selector });
+
     setTimeout(() => {
       // 修复：添加更严格的空值检查
       if (causalChain && causalChain.clearCurrentEvent && typeof causalChain.clearCurrentEvent === 'function') {
@@ -1716,15 +1841,16 @@ document.addEventListener('input', (e) => {
       domStats: collectDOMStats()
     };
 
+    // 使用 eventId 生成确定性 snapshot 文件名
+    const snapshotFileName = EventIdService.getSnapshotFileName(eventId, 'json');
+    inputData.snapshotFileName = snapshotFileName;
+
     ipcRenderer.sendToHost('sentinel-input', inputData);
+    console.log('[Sentinel Webview] Input tracked:', inputData.selector, 'eventId:', eventId, 'snapshot:', snapshotFileName);
+
     setTimeout(() => {
-      // 【修复】只在有实际 DOM 变化时才发送 incremental snapshot
-      if (domMutations.adds.length > 0 ||
-          domMutations.removes.length > 0 ||
-          domMutations.texts.length > 0 ||
-          domMutations.attributes.length > 0) {
-        saveDOMSnapshot('incremental', timestamp);
-      }
+      // 【优化】使用 eventId 触发 snapshot，确保 100% 关联
+      saveDOMSnapshot('user-action', eventId, { action: 'input', selector: inputData.selector });
     }, 100);
 
     // 修复：延迟清除事件上下文
@@ -2034,10 +2160,42 @@ document.addEventListener('drop', (e) => {
   }
 }, true);
 
+// ============================================================================
 // 保存 DOM 快照
-function saveDOMSnapshot(type = 'snapshot', externalTimestamp = null) {
+// ============================================================================
+// 触发场景优化：
+// 1. initial: 页面加载完成时触发（必须）
+// 2. auto: 定时自动保存或重要状态变化时
+// 3. incremental: 仅在 DOM 结构变化时触发（不再由滚动事件触发）
+// 4. user-action: 用户点击、输入等操作后触发
+//
+// 关联方案：使用 eventId 作为文件名，确保 100% 关联准确率
+// 文件名格式: {eventId}.json (例如: evt_1778743560380_042_abc123def.json)
+// ============================================================================
+
+/**
+ * 保存 DOM 快照
+ * @param {string} type - 快照类型: 'initial' | 'auto' | 'incremental' | 'user-action'
+ * @param {string|null} eventId - 关联的事件 ID，用于生成文件名
+ * @param {Object} metadata - 额外元数据
+ */
+function saveDOMSnapshot(type = 'snapshot', eventId = null, metadata = {}) {
+  // 检查录制状态
   if (type !== 'initial' && type !== 'auto' && checkPaused()) return;
 
+  // 检查是否应该跳过（针对增量快照）
+  if (type === 'incremental') {
+    const hasMutations = domMutations.adds.length > 0 ||
+                        domMutations.removes.length > 0 ||
+                        domMutations.texts.length > 0 ||
+                        domMutations.attributes.length > 0;
+    if (!hasMutations) {
+      console.log('[Sentinel Webview] Skipping incremental snapshot - no DOM mutations');
+      return;
+    }
+  }
+
+  // 生成 rrweb 事件
   let rrwebEvent;
   if (type === 'initial' || type === 'auto') {
     rrwebEvent = createFullSnapshot();
@@ -2046,16 +2204,29 @@ function saveDOMSnapshot(type = 'snapshot', externalTimestamp = null) {
     rrwebEvent = createIncrementalSnapshot();
   }
 
+  // 使用 eventId 生成确定性文件名
+  const fileName = EventIdService.getSnapshotFileName(eventId, 'json');
+
   const snapshot = {
     type: type,
     rrwebEvent: rrwebEvent,
     url: window.location.href,
     title: document.title,
-    timestamp: externalTimestamp || Date.now()
+    timestamp: Date.now(),
+    eventId: eventId,  // 关联的事件 ID
+    fileName: fileName,  // 确定性文件名
+    metadata: metadata
   };
 
   ipcRenderer.sendToHost('sentinel-dom-snapshot', snapshot);
-  console.log('[Sentinel Webview] DOM snapshot saved:', type, 'event type:', rrwebEvent.type);
+  console.log('[Sentinel Webview] DOM snapshot saved:', {
+    type: type,
+    eventType: rrwebEvent.type,
+    eventId: eventId,
+    fileName: fileName
+  });
+
+  return fileName;
 }
 
 window.saveDOMSnapshot = saveDOMSnapshot;
@@ -2118,10 +2289,10 @@ function handlePageLoadComplete() {
   
   console.log('[Sentinel Webview] Page-load-complete event sent to host, eventId:', eventId, 'duration:', duration);
 
-  // 【修正】每次页面加载都应该发送 initial snapshot，因为 DOM 完全不同了
-  // 撤销之前的错误修复：不能用 isInitialized 阻止，否则新页面没有 initial snapshot
-  saveDOMSnapshot('initial', timestamp);
-  console.log('[Sentinel Webview] Initial DOM snapshot created after page load');
+  // 【优化】使用 eventId 触发 initial snapshot，确保 100% 关联
+  // 页面加载完成时的 DOM 快照，使用 page-load-start 的 eventId
+  const snapshotFileName = saveDOMSnapshot('initial', eventId, { trigger: 'page-load-complete' });
+  console.log('[Sentinel Webview] Initial DOM snapshot created after page load:', snapshotFileName);
 
   // 每次页面加载都重新初始化 MutationObserver（因为 DOM 完全不同）
   initMutationObserver();

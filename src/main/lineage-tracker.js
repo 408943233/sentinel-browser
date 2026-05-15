@@ -1,10 +1,18 @@
-const log = require('electron-log');
-const { generateUUID } = require('../shared/utils');
-
 /**
- * 谱系追踪器
+ * ============================================================================
+ * 谱系追踪器（LineageTracker）
+ * ============================================================================
+ * 
+ * 【核心职责】
  * 追踪多窗口、多标签页的谱系关系
+ * 
+ * 【Event ID 生成】
+ * 使用统一 ID 生成服务（EventIdService）确保 ID 格式一致性
+ * ============================================================================
  */
+
+const log = require('electron-log');
+const EventIdService = require('../shared/event-id-service');
 class LineageTracker {
   constructor() {
     this.windows = new Map();
@@ -71,10 +79,18 @@ class LineageTracker {
 
   /**
    * 记录事件
+   * 【优化】使用统一 ID 生成服务
    */
   recordEvent(windowId, eventData) {
+    // 使用统一 ID 生成服务，确保格式一致性
+    const eventId = EventIdService.generateId('evt_win', {
+      source: 'lineage-tracker.recordEvent',
+      windowId,
+      type: eventData.type
+    });
+    
     const event = {
-      id: `evt_${generateUUID().slice(0, 8)}`,
+      id: eventId,
       windowId,
       timestamp: Date.now(),
       ...eventData

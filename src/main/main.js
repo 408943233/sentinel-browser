@@ -3604,6 +3604,10 @@ async function recordUserAction(actionData) {
 }
 
 // 保存 DOM 快照
+/**
+ * 保存 DOM 快照
+ * 【优化】使用确定性文件名（基于 eventId），确保 100% 关联准确率
+ */
 function saveDOMSnapshot(snapshotData) {
   if (!globalState.isRecording || !globalState.currentTask) {
     return;
@@ -3625,16 +3629,26 @@ function saveDOMSnapshot(snapshotData) {
     const timestamp = snapshotData.timestamp || Date.now();
     const isInitial = snapshotData.type === 'initial';
     
-    // 生成文件名
-    // 只有第一次 initial snapshot 使用 snapshot_initial.json
-    // 后续的 initial snapshot（如页面跳转后的新页面）使用 timestamp 文件名
+    // 【优化】使用传递的确定性文件名（基于 eventId）
+    // 优先级: 1. snapshotData.fileName (来自 preload，基于 eventId)
+    //        2. snapshot_initial.json (第一次初始快照)
+    //        3. snapshot_${timestamp}.json (降级方案)
     let fileName;
-    if (isInitial && !globalState.initialSnapshotSaved) {
+    if (snapshotData.fileName) {
+      // 使用 preload 传递的确定性文件名（基于 eventId）
+      fileName = snapshotData.fileName;
+      log.info('Using deterministic filename from preload:', fileName, 'eventId:', snapshotData.eventId);
+    } else if (isInitial && !globalState.initialSnapshotSaved) {
+      // 兼容：第一次初始快照使用 snapshot_initial.json
       fileName = 'snapshot_initial.json';
       globalState.initialSnapshotSaved = true;
+      log.info('Using initial snapshot filename:', fileName);
     } else {
+      // 降级：使用时间戳文件名（不推荐，仅用于兼容）
       fileName = `snapshot_${timestamp}.json`;
+      log.warn('Using timestamp fallback filename:', fileName, 'consider updating preload');
     }
+    
     const filePath = path.join(domDir, fileName);
 
     // 保存 rrweb 格式的 DOM 快照
@@ -5148,9 +5162,14 @@ ipcMain.on('page-load-start', (event, loadData) => {
   const timestamp = loadData.timestamp || Date.now();
   log.info('[Main] Page load start received from renderer:', loadData.url, 'timestamp:', timestamp);
   
-  // 使用 UnifiedEventManager 创建 page-load-start 事件
+  // 【优化】使用统一 ID 生成服务创建 page-load-start 事件
   if (globalState.unifiedEventManager) {
-    const eventId = globalState.unifiedEventManager.generateId('evt_page_load');
+    const EventIdService = require('../shared/event-id-service');
+    const eventId = EventIdService.generateId('evt_page_load', {
+      source: 'main.page-load-start',
+      url: loadData.url?.substring(0, 100)
+    });
+    
     globalState.unifiedEventManager.createEvent({
       eventId: eventId,
       type: 'page-load-start',

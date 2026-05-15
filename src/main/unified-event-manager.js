@@ -1,26 +1,36 @@
 /**
+ * ============================================================================
  * 统一事件管理器（UnifiedEventManager）
+ * ============================================================================
  * 
- * 核心职责：
+ * 【核心职责】
  * 1. 统一管理所有浏览器事件的创建、存储和写入
  * 2. 基于因果关系链（eventId）实现精确的事件关联，不使用时间窗匹配
  * 3. 支持 20+ 种数据类型的关联：网络请求、存储操作、通信、用户交互等
  * 4. 提供可靠的写入机制，带重试和防重复写入
  * 
- * 架构位置：
+ * 【架构位置】
  * - 位于 Main Process（主进程）
  * - 接收来自 Preload 层（CausalChainTracker）的事件数据
  * - 输出到 training_manifest.jsonl（黄金文件）
  * 
- * 关键设计：
+ * 【关键设计】
  * - 使用 Map 存储事件（eventId -> event），支持快速查找
  * - 使用队列管理写入操作，确保顺序和可靠性
  * - 写入成功后立即从内存删除，防止内存泄漏
+ * - 使用统一 ID 生成服务（EventIdService）确保 ID 格式一致性
+ * 
+ * 【Event ID 关联】
+ * - 优先使用 Preload 传递的 eventId（继承上下文）
+ * - 没有 eventId 时，使用 EventIdService.ensureId() 降级生成
+ * - 所有事件必须包含有效的 eventId
+ * ============================================================================
  */
 
 const fs = require('fs');
 const path = require('path');
 const logger = require('../shared/logger');
+const EventIdService = require('../shared/event-id-service');
 const eventLog = logger.create('UnifiedEventManager');
 
 class UnifiedEventManager {
@@ -376,9 +386,18 @@ class UnifiedEventManager {
       return null;
     }
 
-    // 使用传入的 eventId 或生成新的
+    // 【优化】使用统一 ID 生成服务确保有效的 eventId
+    // 优先使用传入的 eventId（继承上下文），无效时降级生成
     const timestamp = eventData.timestamp || Date.now();
-    const eventId = eventData.eventId || this.generateId('evt', timestamp);
+    const eventId = EventIdService.ensureId(
+      eventData.eventId,
+      'evt',
+      {
+        source: 'unified-event-manager.createEvent',
+        type: eventData.type,
+        url: eventData.url?.substring(0, 100)
+      }
+    );
     
     // 修复：如果事件已存在，不再重新创建（避免覆盖已关联的数据）
     if (this.events.has(eventId)) {
@@ -1235,17 +1254,18 @@ class UnifiedEventManager {
 
   /**
    * 生成唯一ID
+   * 【优化】使用统一 ID 生成服务（EventIdService）
    * 用于生成 eventId、requestId 等
    * 
    * 格式：{prefix}_{时间戳}_{计数器}_{随机数}
-   * 示例：evt_1234567890123_42_a1b2c3d4e
+   * 示例：evt_1234567890123_042_a1b2c3d4e
    * 
-   * @param {string} prefix - ID 前缀（默认 'id'）
+   * @param {string} prefix - ID 前缀（默认 'evt'）
+   * @param {Object} metadata - 元数据（用于日志和调试）
    * @returns {string} 唯一ID
    */
-  generateId(prefix = 'id', timestamp = null) {
-    const ts = timestamp || Date.now();
-    return `${prefix}_${ts}_${Math.random().toString(36).substr(2, 9)}`;
+  generateId(prefix = 'evt', metadata = {}) {
+    return EventIdService.generateId(prefix, metadata);
   }
 
   /**
@@ -1277,7 +1297,12 @@ class UnifiedEventManager {
    */
   createOrphanEvent(requestData) {
     const timestamp = Date.now();
-    const eventId = this.generateId('evt_orphan', timestamp);
+    // 【优化】使用统一 ID 生成服务，添加元数据便于调试
+    const eventId = this.generateId('evt_orphan', {
+      reason: 'no-parent-context',
+      source: 'unified-event-manager.createOrphanEvent',
+      url: requestData.url?.substring(0, 100)
+    });
 
     // 使用 createEvent 创建基础事件，然后添加请求信息
     const orphanEvent = {
