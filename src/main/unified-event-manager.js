@@ -600,10 +600,34 @@ class UnifiedEventManager {
    * @returns {boolean} 关联成功返回 true，事件不存在返回 false
    */
   associateRequest(eventId, requestData) {
-    // 处理 eventId 为 null 的情况：创建一个临时事件来存储这些请求
+    // 【修复】处理 eventId 为 null 的情况：尝试关联到最近的 page-load-start 事件
     if (!eventId) {
-      console.warn('[UnifiedEventManager] Request with null eventId, creating orphan event:', requestData.url);
-      eventId = this.createOrphanEvent(requestData);
+      // 查找最近的 page-load-start 事件（5秒内）
+      let pageLoadEvent = null;
+      let minTimeDiff = Infinity;
+      const now = Date.now();
+
+      for (const [evtId, evt] of this.events) {
+        if (evt.type === 'page-load-start') {
+          const timeDiff = Math.abs(now - evt.timestamp);
+          if (timeDiff < minTimeDiff && timeDiff < 5000) { // 5秒内
+            minTimeDiff = timeDiff;
+            pageLoadEvent = evt;
+          }
+        }
+      }
+
+      if (pageLoadEvent) {
+        console.log('[UnifiedEventManager] Associating request to page-load-start event:', {
+          url: requestData.url,
+          eventId: pageLoadEvent.eventId,
+          timeDiff: minTimeDiff
+        });
+        eventId = pageLoadEvent.eventId;
+      } else {
+        console.warn('[UnifiedEventManager] Request with null eventId, creating orphan event:', requestData.url);
+        eventId = this.createOrphanEvent(requestData);
+      }
     }
     
     const event = this.events.get(eventId);
