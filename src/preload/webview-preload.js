@@ -307,9 +307,78 @@ class AsyncContextTracker {
 }
 
 // ============================================================================
-// 引入统一 ID 生成服务
+// 内联统一 ID 生成服务 (避免 webview 中的模块加载问题)
 // ============================================================================
-const EventIdService = require('../shared/event-id-service');
+class EventIdService {
+  constructor() {
+    this.counter = 0;
+    this.lastTimestamp = 0;
+    this.stats = {
+      totalGenerated: 0,
+      fallbackGenerated: 0,
+      byType: new Map()
+    };
+  }
+
+  generateId(type = 'evt', metadata = {}) {
+    const timestamp = Date.now();
+    
+    if (timestamp === this.lastTimestamp) {
+      this.counter++;
+    } else {
+      this.counter = 1;
+      this.lastTimestamp = timestamp;
+    }
+    
+    const random = Math.random().toString(36).substr(2, 9);
+    const eventId = `${type}_${timestamp}_${this.counter.toString().padStart(3, '0')}_${random}`;
+    
+    this.stats.totalGenerated++;
+    const typeCount = this.stats.byType.get(type) || 0;
+    this.stats.byType.set(type, typeCount + 1);
+    
+    console.log('[EventIdService] Generated:', eventId, metadata);
+    return eventId;
+  }
+
+  ensureId(eventId, fallbackType = 'evt', metadata = {}) {
+    if (eventId && this.validateId(eventId)) {
+      return eventId;
+    }
+    
+    this.stats.fallbackGenerated++;
+    const newId = this.generateId(fallbackType, {
+      ...metadata,
+      fallback: true,
+      requestedId: eventId
+    });
+    
+    console.warn('[EventIdService] Fallback generated:', {
+      requested: eventId,
+      generated: newId,
+      reason: metadata.reason || 'invalid-or-missing'
+    });
+    
+    return newId;
+  }
+
+  validateId(eventId) {
+    if (typeof eventId !== 'string') return false;
+    const pattern = /^(evt|evt_page_load|evt_orphan|req|ws|sse|beacon|pm|bc|idb|cache|win|orphan)_\d{13}_\d{3}_[a-z0-9]{9}$/;
+    return pattern.test(eventId);
+  }
+
+  getSnapshotFileName(eventId, extension = 'json') {
+    if (!eventId || !this.validateId(eventId)) {
+      console.warn('[EventIdService] Invalid eventId for snapshot filename, using timestamp fallback');
+      return `snapshot_${Date.now()}.${extension}`;
+    }
+    return `${eventId}.${extension}`;
+  }
+}
+
+// 单例实例
+const eventIdService = new EventIdService();
 
 // ============================================================================
 // 内联的 CausalChainTracker 类
@@ -460,7 +529,7 @@ class CausalChainTracker {
    * 使用统一 ID 生成服务
    */
   generateId(prefix = 'evt', metadata = {}) {
-    return EventIdService.generateId(prefix, metadata);
+    return eventIdService.generateId(prefix, metadata);
   }
 
   setCurrentEvent(eventType, eventData = {}) {
@@ -1782,7 +1851,7 @@ document.addEventListener('click', (e) => {
   };
 
   // 使用 eventId 生成确定性 snapshot 文件名
-  const snapshotFileName = EventIdService.getSnapshotFileName(eventId, 'json');
+  const snapshotFileName = eventIdService.getSnapshotFileName(eventId, 'json');
   clickData.snapshotFileName = snapshotFileName;
 
   ipcRenderer.sendToHost('sentinel-click', clickData);
@@ -1842,7 +1911,7 @@ document.addEventListener('input', (e) => {
     };
 
     // 使用 eventId 生成确定性 snapshot 文件名
-    const snapshotFileName = EventIdService.getSnapshotFileName(eventId, 'json');
+    const snapshotFileName = eventIdService.getSnapshotFileName(eventId, 'json');
     inputData.snapshotFileName = snapshotFileName;
 
     ipcRenderer.sendToHost('sentinel-input', inputData);
@@ -2205,7 +2274,7 @@ function saveDOMSnapshot(type = 'snapshot', eventId = null, metadata = {}) {
   }
 
   // 使用 eventId 生成确定性文件名
-  const fileName = EventIdService.getSnapshotFileName(eventId, 'json');
+  const fileName = eventIdService.getSnapshotFileName(eventId, 'json');
 
   const snapshot = {
     type: type,
