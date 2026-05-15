@@ -527,7 +527,8 @@ class UnifiedEventManager {
         formSubmissions: [],    // 表单提交
         lifecycleEvents: [],    // 生命周期事件
         securityEvents: [],     // 安全事件
-        cssAnimations: []       // CSS 动画
+        cssAnimations: [],      // CSS 动画
+        consoleLogs: []         // 【修复】控制台日志
       },
 
       // ==================== 文件IO（从旧格式添加）====================
@@ -935,6 +936,20 @@ class UnifiedEventManager {
         break;
       case 'performance':
         event.operations.performanceEntries.push(opData);
+        break;
+      case 'page-load-complete':
+        // 【修复】支持 page-load-complete 类型
+        if (!event.operations.lifecycleEvents) {
+          event.operations.lifecycleEvents = [];
+        }
+        event.operations.lifecycleEvents.push(opData);
+        break;
+      case 'console':
+        // 【修复】支持 console 类型
+        if (!event.operations.consoleLogs) {
+          event.operations.consoleLogs = [];
+        }
+        event.operations.consoleLogs.push(opData);
         break;
       default:
         console.warn('[UnifiedEventManager] Unknown operation type:', opData.type);
@@ -1503,7 +1518,8 @@ class UnifiedEventManager {
         formSubmissions: [],
         lifecycleEvents: [],
         securityEvents: [],
-        cssAnimations: []
+        cssAnimations: [],
+        consoleLogs: []         // 【修复】控制台日志
       },
 
       // ==================== 文件IO ====================
