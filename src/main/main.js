@@ -1024,12 +1024,14 @@ function createMainWindow() {
         break;
 
       case 'sentinel-page-load-start':
-        log.info('[Main] Webview page load start received:', data.url, 'timestamp:', data.timestamp, 'eventId:', data.eventId);
+        log.info('[Main] Webview page load start received:', data.url, 'timestamp:', data.timestamp, 'eventId:', data.eventId, 'snapshotFileName:', data.snapshotFileName);
         {
           // 页面加载开始事件 - 在 HTML 下载前创建，确保后续请求能关联
           const timestamp = data.timestamp || Date.now();
-          log.info('[Main] Recording page-load-start event, timestamp:', timestamp, 'eventId:', data.eventId);
-          
+          // 【修复】使用 preload 传递的确定性文件名（基于 eventId）
+          const domSnapshotFileName = data.snapshotFileName || (data.eventId ? `${data.eventId}.json` : `snapshot_${timestamp}.json`);
+          log.info('[Main] Recording page-load-start event, timestamp:', timestamp, 'eventId:', data.eventId, 'snapshot:', domSnapshotFileName);
+
           // 使用 UnifiedEventManager 创建事件，确保 eventId 被正确记录
           if (globalState.unifiedEventManager && data.eventId) {
             globalState.unifiedEventManager.createEvent({
@@ -1039,12 +1041,14 @@ function createMainWindow() {
               url: data.url,
               title: data.title,
               navigationTiming: data.navigationTiming,
-              isLoading: true // 页面开始加载
+              isLoading: true, // 页面开始加载
+              // 【修复】添加 DOM 快照文件名
+              domSnapshotFileName: domSnapshotFileName
             });
             // 立即刷新到磁盘，确保后续关联能找到
             globalState.unifiedEventManager.flushEvent(data.eventId);
           }
-          
+
           // 同时记录到用户操作（向后兼容）
           recordUserAction({
             eventId: data.eventId,
@@ -1053,19 +1057,24 @@ function createMainWindow() {
             url: data.url,
             title: data.title,
             navigationTiming: data.navigationTiming,
-            isLoading: true
+            isLoading: true,
+            // 【修复】添加基于 eventId 的确定性文件名
+            domSnapshotFileName: domSnapshotFileName,
+            domSnapshotPath: `dom/${domSnapshotFileName}`
           });
-          log.info('[Main] Page-load-start event recorded, eventId:', data.eventId);
+          log.info('[Main] Page-load-start event recorded, eventId:', data.eventId, 'snapshot:', domSnapshotFileName);
         }
         break;
 
       case 'sentinel-page-load-complete':
-        log.info('[Main] Webview page load complete received:', data.url, 'timestamp:', data.timestamp, 'eventId:', data.eventId);
+        log.info('[Main] Webview page load complete received:', data.url, 'timestamp:', data.timestamp, 'eventId:', data.eventId, 'snapshotFileName:', data.snapshotFileName);
         {
           // 页面加载完成事件 - 使用与 page-load-start 相同的 eventId
           const timestamp = data.timestamp || Date.now();
-          log.info('[Main] Recording page-load-complete event, timestamp:', timestamp, 'eventId:', data.eventId);
-          
+          // 【修复】使用 preload 传递的确定性文件名（基于 eventId）
+          const domSnapshotFileName = data.snapshotFileName || (data.eventId ? `${data.eventId}.json` : `snapshot_${timestamp}.json`);
+          log.info('[Main] Recording page-load-complete event, timestamp:', timestamp, 'eventId:', data.eventId, 'snapshot:', domSnapshotFileName);
+
           // 关联到 page-load-start 事件（如果存在）
           if (globalState.unifiedEventManager && data.eventId) {
             globalState.unifiedEventManager.associateOperation(data.eventId, {
@@ -1075,9 +1084,8 @@ function createMainWindow() {
               isLoading: false // 页面加载完成
             });
           }
-          
-          // 只有第一次页面加载使用 snapshot_initial.json，后续使用 timestamp 文件名
-          const isInitial = !globalState.initialSnapshotSaved;
+
+          // 【修复】使用基于 eventId 的确定性文件名，不再使用 snapshot_initial.json
           recordUserAction({
             eventId: data.eventId,
             type: 'page-load-complete',
@@ -1086,10 +1094,11 @@ function createMainWindow() {
             title: data.title,
             navigationTiming: data.navigationTiming,
             isLoading: false,
-            domSnapshotFileName: isInitial ? 'snapshot_initial.json' : `snapshot_${timestamp}.json`,
-            domSnapshotPath: isInitial ? 'dom/snapshot_initial.json' : `dom/snapshot_${timestamp}.json`
+            // 【修复】使用基于 eventId 的确定性文件名
+            domSnapshotFileName: domSnapshotFileName,
+            domSnapshotPath: `dom/${domSnapshotFileName}`
           });
-          log.info('[Main] Page-load-complete event recorded, isInitial:', isInitial, 'duration:', data.navigationTiming?.duration);
+          log.info('[Main] Page-load-complete event recorded, eventId:', data.eventId, 'snapshot:', domSnapshotFileName, 'duration:', data.navigationTiming?.duration);
         }
         break;
 

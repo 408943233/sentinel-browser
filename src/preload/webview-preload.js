@@ -1381,6 +1381,9 @@ function initPageLoadStart() {
     console.warn('[Sentinel Webview] causalChain not available for page-load-start');
   }
 
+  // 【修复】使用 eventId 生成确定性 snapshot 文件名
+  const pageLoadSnapshotFileName = pageLoadEventId ? eventIdService.getSnapshotFileName(pageLoadEventId, 'json') : null;
+
   // 发送 page-load-start 事件到主进程
   ipcRenderer.sendToHost('sentinel-page-load-start', {
     eventId: pageLoadEventId,
@@ -1390,10 +1393,12 @@ function initPageLoadStart() {
     timestamp: Date.now(),
     navigationTiming: {
       startTime: pageLoadStartTime
-    }
+    },
+    // 【修复】添加基于 eventId 的 snapshot 文件名
+    snapshotFileName: pageLoadSnapshotFileName
   });
-  
-  console.log('[Sentinel Webview] Page-load-start event sent to host');
+
+  console.log('[Sentinel Webview] Page-load-start event sent to host, snapshot:', pageLoadSnapshotFileName);
 }
 
 // 立即执行页面加载开始事件初始化
@@ -2342,10 +2347,13 @@ function handlePageLoadComplete() {
 
   // 使用 page-load-start 时创建的 eventId，确保事件关联
   const eventId = pageLoadEventId;
-  
+
   if (!eventId) {
     console.warn('[Sentinel Webview] pageLoadEventId not available for page-load-complete');
   }
+
+  // 【修复】使用 eventId 生成确定性 snapshot 文件名
+  const pageLoadSnapshotFileName = eventId ? eventIdService.getSnapshotFileName(eventId, 'json') : null;
 
   // 发送 page-load-complete 事件到主进程，使用相同的 eventId
   ipcRenderer.sendToHost('sentinel-page-load-complete', {
@@ -2358,10 +2366,12 @@ function handlePageLoadComplete() {
       startTime: pageLoadStartTime,
       endTime: pageLoadEndTime,
       duration: duration
-    }
+    },
+    // 【修复】添加基于 eventId 的 snapshot 文件名
+    snapshotFileName: pageLoadSnapshotFileName
   });
-  
-  console.log('[Sentinel Webview] Page-load-complete event sent to host, eventId:', eventId, 'duration:', duration);
+
+  console.log('[Sentinel Webview] Page-load-complete event sent to host, eventId:', eventId, 'snapshot:', pageLoadSnapshotFileName, 'duration:', duration);
 
   // 【优化】使用 eventId 触发 initial snapshot，确保 100% 关联
   // 页面加载完成时的 DOM 快照，使用 page-load-start 的 eventId
