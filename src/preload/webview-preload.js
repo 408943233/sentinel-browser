@@ -1665,9 +1665,9 @@ function initMutationObserver() {
         window.__sentinelPendingSnapshot = true;
         setTimeout(() => {
           window.__sentinelPendingSnapshot = false;
-          if (domMutations.adds.length > 0 || 
-              domMutations.removes.length > 0 || 
-              domMutations.texts.length > 0 || 
+          if (domMutations.adds.length > 0 ||
+              domMutations.removes.length > 0 ||
+              domMutations.texts.length > 0 ||
               domMutations.attributes.length > 0) {
             console.log('[Sentinel Webview] Sending incremental snapshot, changes:', {
               adds: domMutations.adds.length,
@@ -1675,7 +1675,9 @@ function initMutationObserver() {
               texts: domMutations.texts.length,
               attributes: domMutations.attributes.length
             });
-            saveDOMSnapshot('incremental');
+            // 【修复】获取当前 eventId 并传递
+            const currentEventId = causalChain ? causalChain.getCurrentEventId() : null;
+            saveDOMSnapshot('incremental', currentEventId);
           }
         }, 100); // 100ms 后发送，批量处理
       }
@@ -2311,19 +2313,22 @@ ipcRenderer.on('trigger-dom-snapshot', (event, data) => {
   const type = data?.type || 'incremental';
   const timestamp = data?.timestamp || Date.now();
 
+  // 【修复】获取当前 eventId 用于生成确定性文件名
+  const currentEventId = causalChain ? causalChain.getCurrentEventId() : null;
+
   // 【修复】对于 incremental 类型，只在有实际 DOM 变化时才发送
   if (type === 'incremental') {
     if (domMutations.adds.length > 0 ||
         domMutations.removes.length > 0 ||
         domMutations.texts.length > 0 ||
         domMutations.attributes.length > 0) {
-      saveDOMSnapshot(type, timestamp);
+      saveDOMSnapshot(type, currentEventId || `evt_${timestamp}_001_fallback`);
     } else {
       console.log('[Sentinel Webview] Skipping empty incremental snapshot');
     }
   } else {
     // initial 和 auto 类型直接发送
-    saveDOMSnapshot(type, timestamp);
+    saveDOMSnapshot(type, currentEventId || `evt_${timestamp}_001_fallback`);
   }
 });
 
